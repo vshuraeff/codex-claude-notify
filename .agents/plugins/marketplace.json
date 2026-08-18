@@ -1,0 +1,20 @@
+{
+  "name": "codex-claude-notify",
+  "interface": {
+    "displayName": "Codex Claude Notify"
+  },
+  "plugins": [
+    {
+      "name": "codex-claude-notify",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-claude-notify"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "codex-claude-notify",
+  "version": "1.0.0",
+  "description": "Forwards Codex turn-complete notifications to the Claude Code session that launched Codex, over its messaging socket.",
+  "author": {
+    "name": "Valentin Shuraeff"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/vshuraeff/codex-claude-notify",
+  "interface": {
+    "displayName": "Codex Claude Notify",
+    "shortDescription": "Forwards Codex completion notifications to Claude Code.",
+    "longDescription": "Forwards Codex agent turn completion messages to the launching Claude Code session over its authenticated Unix messaging socket.",
+    "developerName": "Valentin Shuraeff",
+    "category": "Productivity",
+    "capabilities": [
+      "Unix socket notification delivery"
+    ],
+    "defaultPrompt": []
+  }
+}

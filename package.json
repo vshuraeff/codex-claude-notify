@@ -1,0 +1,21 @@
+{
+  "name": "codex-claude-notify",
+  "version": "1.0.0",
+  "description": "Forwards Codex turn-complete notifications to the Claude Code session that launched Codex, over its messaging socket.",
+  "bin": {
+    "codex-claude-notify": "./plugins/codex-claude-notify/hooks/notify.mjs"
+  },
+  "files": ["plugins/"],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vshuraeff/codex-claude-notify.git"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/notify.test.mjs"
+  }
+}
