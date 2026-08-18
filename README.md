@@ -15,13 +15,13 @@ Delivery uses the per-session Unix domain socket that Claude Code exports to the
 ## Install
 
 ```sh
-npm install -g codex-claude-notify
+bun add -g codex-claude-notify
 ```
 
-If the package is not yet available on the npm registry, install directly from GitHub with the command below; the same command also installs the current `master` instead of the published version:
+If the package is not yet available on the registry, install directly from GitHub with the command below; the same command also installs the current `master` instead of the published version:
 
 ```sh
-npm install -g vshuraeff/codex-claude-notify
+bun add -g github:vshuraeff/codex-claude-notify
 ```
 
 Then register a `Stop` hook in `~/.codex/hooks.json` (`~/.codex` is the default `CODEX_HOME`; adjust if you have overridden it):
@@ -103,7 +103,7 @@ Two environment variables control it:
 ## Requirements
 
 - macOS or Linux. Delivery goes through a Unix domain socket, so Windows is not supported.
-- Node.js 20 or newer, on `PATH`.
+- Bun 1.2 or newer, on `PATH`.
 - Codex CLI with hook support for the `Stop` path, verified on 0.147.0. The legacy path needs only the `notify` configuration option.
 - Claude Code 2.1.228 or newer, with cross-session messaging enabled.
 
@@ -136,13 +136,14 @@ If a message never arrives, check in order:
 - Are the feature-flag variables clear: `env | grep -E 'DISABLE_TELEMETRY|DO_NOT_TRACK|DISABLE_GROWTHBOOK|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'` should print nothing.
 - Delivery errors go to the Codex process's stderr, and the hook always exits 0, so a failed delivery never fails the Codex turn.
 - For automation or CI where the interactive trust step is unavailable, `codex exec --dangerously-bypass-hook-trust` skips it; use this only against an isolated, disposable `CODEX_HOME`, never a real one.
+- The hook runs as `bun`, resolved from the Codex process's `PATH`. `~/.bun/bin` is normally added to `PATH` by shell rc files, so a Codex process started outside a login shell (a GUI app or a service manager) may not have it and fails with `bun: command not found` on stderr. Fix this by pointing the hook at the full path to `bun` in `hooks.json` or `config.toml`, or by setting `PATH` in the service's own environment.
 
 ## Testing
 
 From a clone of the repository:
 
 ```sh
-npm test
+bun test
 ```
 
 This is offline and safe to run anywhere.
@@ -151,14 +152,14 @@ This is offline and safe to run anywhere.
 bash test/e2e/smoke.sh [persistent-home-dir]
 ```
 
-This is a live test, not offline: it copies `~/.codex/auth.json` into an isolated, throwaway `CODEX_HOME` and runs two real `codex exec` calls, which are billed. It requires an installed and authenticated `codex` CLI, `node`, and `jq`.
+This is a live test, not offline: it copies `~/.codex/auth.json` into an isolated, throwaway `CODEX_HOME` and runs two real `codex exec` calls, which are billed. It requires an installed and authenticated `codex` CLI, `bun`, and `jq`.
 
 ## Releases
 
 This project follows [semantic versioning](https://semver.org/); before 1.0, minor version bumps may include breaking changes.
-To cut a release, run `npm version patch|minor|major`, which bumps both `package.json` and `plugin.json` through the version lifecycle script and creates a `vX.Y.Z` tag; then run `git push --follow-tags`.
-Then run `npm publish`. Publishing requires an npm account with publish rights for `codex-claude-notify`; before the first publish, the package is available only from GitHub using the install command above.
-The Codex plugin marketplace picks up git updates automatically; npm users update with `npm update -g codex-claude-notify`.
+To cut a release, run `bun pm version patch|minor|major`, which bumps both `package.json` and `plugin.json` through the version lifecycle script and creates a `vX.Y.Z` tag; then run `git push --follow-tags`. `bun pm version` requires Bun 1.2.19 or newer; this is a maintainer-tooling requirement, separate from the runtime requirement in Requirements.
+Then run `bun publish`. Publishing requires an npm registry account with publish rights for the package; before the first publish, the package is available only from GitHub using the install command above.
+The Codex plugin marketplace picks up git updates automatically; bun users update by re-running `bun add -g codex-claude-notify`.
 
 ## License
 

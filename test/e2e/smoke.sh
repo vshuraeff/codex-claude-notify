@@ -188,7 +188,7 @@ result_b=FAIL
 # run a: legacy notify mode
 printf '%s\n' 'RUN A: legacy notify mode'
 rm -f "$CODEX_HOME/hooks.json"
-printf '%s\n' "notify = [\"node\", \"$repo_root/plugins/codex-claude-notify/hooks/notify.mjs\"]" > "$CODEX_HOME/config.toml"
+printf '%s\n' "notify = [\"bun\", \"$repo_root/plugins/codex-claude-notify/hooks/notify.mjs\"]" > "$CODEX_HOME/config.toml"
 
 socket_a="$scratch/a.sock"
 output_a="$scratch/a-output.ndjson"
@@ -196,7 +196,7 @@ prompt_a="$scratch/prompt-a.md"
 token_a="smoke-$RANDOM-$RANDOM"
 printf '%s\n' 'hello' > "$prompt_a"
 
-node "$repo_root/test/e2e/listener.mjs" "$socket_a" "$output_a" &
+bun "$repo_root/test/e2e/listener.mjs" "$socket_a" "$output_a" &
 listener_pid_a=$!
 
 listener_ready_a=FAIL
@@ -231,7 +231,7 @@ fi
 printf '%s\n' 'RUN B: config-layer Stop hook mode'
 : > "$CODEX_HOME/config.toml"
 script_path="$repo_root/plugins/codex-claude-notify/hooks/notify.mjs"
-printf -v escaped 'node %q' "$script_path"
+printf -v escaped 'bun %q' "$script_path"
 jq -n \
   --arg command "$escaped" \
   '{hooks:{Stop:[{hooks:[{type:"command",command:$command}]}]}}' \
@@ -243,7 +243,7 @@ prompt_b="$scratch/prompt-b.md"
 token_b="smoke-$RANDOM-$RANDOM"
 printf '%s\n' 'hello' > "$prompt_b"
 
-node "$repo_root/test/e2e/listener.mjs" "$socket_b" "$output_b" &
+bun "$repo_root/test/e2e/listener.mjs" "$socket_b" "$output_b" &
 listener_pid_b=$!
 
 listener_ready_b=FAIL

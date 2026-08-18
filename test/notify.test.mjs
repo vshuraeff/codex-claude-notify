@@ -3,13 +3,12 @@ import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { cpSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
-import net, { createServer } from "node:net";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { describe, test } from "bun:test";
 
 import {
   buildEnvelope,
@@ -292,7 +291,7 @@ test("envelopeFromStopPayload applies teammate name - max length clamp", () => {
   assert.strictEqual(normalizeTeammateName(teammateName), "a".repeat(64));
 });
 
-test("notification message uses teammate id from flag", async (t) => {
+describe("notification message uses teammate id from flag", () => {
   const cases = [
     {
       name: "plain name",
@@ -316,8 +315,10 @@ test("notification message uses teammate id from flag", async (t) => {
     },
   ];
 
+  test("all cases are registered", () => assert.strictEqual(cases.length, 4));
+
   for (const { name, teammateName, expected } of cases) {
-    await t.test(name, () => {
+    test(name, () => {
       const envelope = buildEnvelope({
         lastAssistantMessage: "ж".repeat(maximumMessageBytes),
         teammateName,
@@ -509,7 +510,7 @@ test("notification message neutralizes malicious metadata", () => {
   assert.strictEqual(envelope.split("</teammate-message>").length - 1, 1);
 });
 
-test("notification envelope contains exactly one literal closing tag", async (t) => {
+describe("notification envelope contains exactly one literal closing tag", () => {
   const cases = [
     { name: "normal message", options: { lastAssistantMessage: "done" } },
     {
@@ -526,8 +527,10 @@ test("notification envelope contains exactly one literal closing tag", async (t)
     },
   ];
 
+  test("all cases are registered", () => assert.strictEqual(cases.length, 4));
+
   for (const { name, options } of cases) {
-    await t.test(name, () => {
+    test(name, () => {
       const envelope = buildEnvelope(options);
       assert.strictEqual(envelope.split("</teammate-message>").length - 1, 1);
       assert.ok(Buffer.byteLength(envelope, "utf8") <= maximumMessageBytes);
@@ -613,7 +616,6 @@ test("socket notifier sends Claude Code frames", async () => {
 });
 
 test("socket notifier times out while connecting", async () => {
-  const originalCreateConnection = net.createConnection;
   const socket = new EventEmitter();
   let destroyCount = 0;
   socket.write = () => {};
@@ -621,31 +623,27 @@ test("socket notifier times out while connecting", async () => {
   socket.destroy = () => {
     destroyCount++;
   };
-  net.createConnection = () => socket;
-  syncBuiltinESMExports();
 
-  try {
-    await assert.rejects(
-      sendMessage(buildEnvelope({ lastAssistantMessage: "connect timeout" }), {
+  await assert.rejects(
+    sendMessage(
+      buildEnvelope({ lastAssistantMessage: "connect timeout" }),
+      {
         socketPath: "/irrelevant/for/this/test",
         token: "t",
         timeout: 50,
-      }),
-      (error) => {
-        assert.match(error.message, /connect to Claude Code messaging socket/);
-        assert.match(error.message, /timeout/i);
-        return true;
       },
-    );
-    assert.strictEqual(destroyCount, 1);
-  } finally {
-    net.createConnection = originalCreateConnection;
-    syncBuiltinESMExports();
-  }
+      { connect: () => socket },
+    ),
+    (error) => {
+      assert.match(error.message, /connect to Claude Code messaging socket/);
+      assert.match(error.message, /timeout/i);
+      return true;
+    },
+  );
+  assert.strictEqual(destroyCount, 1);
 });
 
 test("socket notifier times out while writing", async () => {
-  const originalCreateConnection = net.createConnection;
   const socket = new EventEmitter();
   let destroyCount = 0;
   let writeCount = 0;
@@ -656,128 +654,144 @@ test("socket notifier times out while writing", async () => {
   socket.destroy = () => {
     destroyCount++;
   };
-  net.createConnection = () => {
-    queueMicrotask(() => socket.emit("connect"));
-    return socket;
-  };
-  syncBuiltinESMExports();
 
-  try {
-    await assert.rejects(
-      sendMessage(buildEnvelope({ lastAssistantMessage: "write timeout" }), {
+  await assert.rejects(
+    sendMessage(
+      buildEnvelope({ lastAssistantMessage: "write timeout" }),
+      {
         socketPath: "/irrelevant/for/this/test",
         token: "t",
         timeout: 50,
-      }),
-      (error) => {
-        assert.match(error.message, /write Claude Code messaging frame/);
-        assert.match(error.message, /timeout/i);
-        return true;
       },
+      {
+        connect: () => {
+          queueMicrotask(() => socket.emit("connect"));
+          return socket;
+        },
+      },
+    ),
+    (error) => {
+      assert.match(error.message, /write Claude Code messaging frame/);
+      assert.match(error.message, /timeout/i);
+      return true;
+    },
+  );
+  assert.strictEqual(destroyCount, 1);
+  assert.strictEqual(writeCount, 1);
+});
+
+describe("zero arguments select stdin mode across script path variants", () => {
+  const variants = [
+    { name: "plain script path", scriptPath: () => notifyScriptPath },
+    {
+      name: "copied hooks directory under a path with a space",
+      scriptPath: (variantRoot) => {
+        const copiedHooksDirectoryPath = `${variantRoot}/hooks with space`;
+        cpSync(notifyHooksDirectoryPath, copiedHooksDirectoryPath, { recursive: true });
+        return `${copiedHooksDirectoryPath}/notify.mjs`;
+      },
+    },
+    {
+      name: "symlink to the real script",
+      scriptPath: (variantRoot) => {
+        const symlinkPath = `${variantRoot}/notify-link.mjs`;
+        symlinkSync(notifyScriptPath, symlinkPath);
+        return symlinkPath;
+      },
+    },
+  ];
+  const payload = stopPayload({
+    last_assistant_message: "Delivered from spawned stdin mode.",
+  });
+  const expectedEnvelope = envelopeFromStopPayload(payload);
+  const token = 'stdin-token-"exact"';
+
+  test("all cases are registered", () => assert.strictEqual(variants.length, 3));
+
+  for (const variant of variants) {
+    test(
+      variant.name,
+      async () => {
+        const variantRoot = mkdtempSync(`${tmpdir()}/ccn-script-variants-`);
+        try {
+          const scriptPath = variant.scriptPath(variantRoot);
+          const { frames } = await runDeliveredHook({
+            input: JSON.stringify(payload),
+            scriptPath,
+            token,
+          });
+          assertDeliveredFrames(frames, token, expectedEnvelope);
+        } finally {
+          rmSync(variantRoot, { recursive: true, force: true });
+        }
+      },
+      20000,
     );
-    assert.strictEqual(destroyCount, 1);
-    assert.strictEqual(writeCount, 1);
-  } finally {
-    net.createConnection = originalCreateConnection;
-    syncBuiltinESMExports();
   }
 });
 
-test(
-  "zero arguments select stdin mode across script path variants",
-  { timeout: 20000 },
-  async (t) => {
-    const variantRoot = mkdtempSync(`${tmpdir()}/ccn-script-variants-`);
-    t.after(() => rmSync(variantRoot, { recursive: true, force: true }));
-
-    const copiedHooksDirectoryPath = `${variantRoot}/hooks with space`;
-    cpSync(notifyHooksDirectoryPath, copiedHooksDirectoryPath, { recursive: true });
-    const symlinkPath = `${variantRoot}/notify-link.mjs`;
-    symlinkSync(notifyScriptPath, symlinkPath);
-
-    const variants = [
-      { name: "plain script path", scriptPath: notifyScriptPath },
-      {
-        name: "copied hooks directory under a path with a space",
-        scriptPath: `${copiedHooksDirectoryPath}/notify.mjs`,
-      },
-      { name: "symlink to the real script", scriptPath: symlinkPath },
-    ];
-    const payload = stopPayload({
-      last_assistant_message: "Delivered from spawned stdin mode.",
-    });
-    const expectedEnvelope = envelopeFromStopPayload(payload);
-    const token = 'stdin-token-"exact"';
-
-    for (const variant of variants) {
-      await t.test(variant.name, async () => {
-        const { frames } = await runDeliveredHook({
-          input: JSON.stringify(payload),
-          scriptPath: variant.scriptPath,
-          token,
-        });
-        assertDeliveredFrames(frames, token, expectedEnvelope);
-      });
-    }
-  },
-);
-
-test("importing notify does not install process-wide rejection handlers", async (t) => {
+test("importing notify does not install process-wide rejection handlers", async () => {
   const helperRoot = mkdtempSync(`${tmpdir()}/ccn-import-handler-`);
-  t.after(() => rmSync(helperRoot, { recursive: true, force: true }));
-  const helperScriptPath = `${helperRoot}/import-notify.mjs`;
-  const notifyModuleURL = new URL(
-    "../plugins/codex-claude-notify/hooks/notify.mjs",
-    import.meta.url,
-  );
-  writeFileSync(
-    helperScriptPath,
-    `import ${JSON.stringify(notifyModuleURL.href)};\nPromise.reject(new Error("boom"));\n`,
-  );
+  try {
+    const helperScriptPath = `${helperRoot}/import-notify.mjs`;
+    const notifyModuleURL = new URL(
+      "../plugins/codex-claude-notify/hooks/notify.mjs",
+      import.meta.url,
+    );
+    writeFileSync(
+      helperScriptPath,
+      `import ${JSON.stringify(notifyModuleURL.href)};\nPromise.reject(new Error("boom"));\n`,
+    );
 
-  const result = await runHook("", isolatedEnvironment(), { scriptPath: helperScriptPath });
-  assert.notStrictEqual(result.code, 0);
-  assert.strictEqual(result.signal, null);
-  assert.strictEqual(result.stdout, "");
-  assert.match(result.stderr, /boom/);
-  assert.ok(!result.stderr.startsWith("codex-claude-notify: "));
+    const result = await runHook("", isolatedEnvironment(), { scriptPath: helperScriptPath });
+    assert.notStrictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.match(result.stderr, /boom/);
+    assert.ok(!result.stderr.startsWith("codex-claude-notify: "));
+  } finally {
+    rmSync(helperRoot, { recursive: true, force: true });
+  }
 });
 
-test("fatal handler exits with a broken stderr pipe", { timeout: 5000 }, async (t) => {
+test("fatal handler exits with a broken stderr pipe", async () => {
   const helperRoot = mkdtempSync(`${tmpdir()}/ccn-fatal-handler-`);
-  t.after(() => rmSync(helperRoot, { recursive: true, force: true }));
-  const helperScriptPath = `${helperRoot}/force-fatal.cjs`;
-  writeFileSync(
-    helperScriptPath,
-    [
-      "const watch = (eventName) => {",
-      '  if (eventName !== "uncaughtException") {',
-      "    return;",
-      "  }",
-      '  process.off("newListener", watch);',
-      "  setImmediate(() => {",
-      '    throw new Error("forced fatal error");',
-      "  });",
-      "};",
-      'process.on("newListener", watch);',
-      "",
-    ].join("\n"),
-  );
+  try {
+    const helperScriptPath = `${helperRoot}/force-fatal.cjs`;
+    writeFileSync(
+      helperScriptPath,
+      [
+        "const watch = (eventName) => {",
+        '  if (eventName !== "uncaughtException") {',
+        "    return;",
+        "  }",
+        '  process.off("newListener", watch);',
+        "  setImmediate(() => {",
+        '    throw new Error("forced fatal error");',
+        "  });",
+        "};",
+        'process.on("newListener", watch);',
+        "",
+      ].join("\n"),
+    );
 
-  const startedAt = performance.now();
-  const result = await runHook("", isolatedEnvironment(), {
-    closeStdin: false,
-    closeStderr: true,
-    nodeArgs: ["--require", helperScriptPath],
-    timeoutMilliseconds: 2500,
-  });
-  const duration = performance.now() - startedAt;
+    const startedAt = performance.now();
+    const result = await runHook("", isolatedEnvironment(), {
+      closeStdin: false,
+      closeStderr: true,
+      nodeArgs: ["--require", helperScriptPath],
+      timeoutMilliseconds: 2500,
+    });
+    const duration = performance.now() - startedAt;
 
-  assert.strictEqual(result.code, 0);
-  assert.strictEqual(result.signal, null);
-  assert.strictEqual(result.stdout, "");
-  assert.ok(duration < 2000, `fatal handler took ${duration.toFixed(2)}ms to exit`);
-});
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.ok(duration < 2000, `fatal handler took ${duration.toFixed(2)}ms to exit`);
+  } finally {
+    rmSync(helperRoot, { recursive: true, force: true });
+  }
+}, 5000);
 
 test("notifier from environment", () => {
   assert.deepStrictEqual(
@@ -842,7 +856,6 @@ test("socket notifier rejects empty and oversized messages", async () => {
 
 test(
   "stdin payload larger than 70000 bytes is drained when messaging variables are absent",
-  { timeout: 5000 },
   async () => {
     const input = JSON.stringify(
       stopPayload({ last_assistant_message: "x".repeat(80000) }),
@@ -854,34 +867,43 @@ test(
     assert.strictEqual(result.stdout, "");
     assert.strictEqual(result.stderr, "");
   },
+  5000,
 );
 
-test("oversized stdin payload is drained and skipped", { timeout: 6000 }, async () => {
-  const input = "x".repeat(9 * 1024 * 1024);
-  assert.ok(Buffer.byteLength(input, "utf8") > maximumStdinBytes);
-  const result = await runHook(input, isolatedEnvironment());
-  assert.strictEqual(result.code, 0);
-  assert.strictEqual(result.signal, null);
-  assert.strictEqual(result.stdout, "");
-  assert.strictEqual(
-    result.stderr,
-    `codex-claude-notify: stdin payload exceeds ${maximumStdinBytes} bytes; notification skipped\n`,
-  );
-});
+test(
+  "oversized stdin payload is drained and skipped",
+  async () => {
+    const input = "x".repeat(9 * 1024 * 1024);
+    assert.ok(Buffer.byteLength(input, "utf8") > maximumStdinBytes);
+    const result = await runHook(input, isolatedEnvironment());
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.strictEqual(
+      result.stderr,
+      `codex-claude-notify: stdin payload exceeds ${maximumStdinBytes} bytes; notification skipped\n`,
+    );
+  },
+  6000,
+);
 
-test("disabled hook drains stdin and exits silently", { timeout: 5000 }, async () => {
-  const input = JSON.stringify(stopPayload({ last_assistant_message: "x".repeat(80000) }));
-  const result = await runHook(
-    input,
-    isolatedEnvironment({
-      CODEX_CLAUDE_NOTIFY_DISABLE: "1",
-      CLAUDE_CODE_MESSAGING_TOKEN: "token-without-socket",
-    }),
-  );
-  assert.strictEqual(result.code, 0);
-  assert.strictEqual(result.stdout, "");
-  assert.strictEqual(result.stderr, "");
-});
+test(
+  "disabled hook drains stdin and exits silently",
+  async () => {
+    const input = JSON.stringify(stopPayload({ last_assistant_message: "x".repeat(80000) }));
+    const result = await runHook(
+      input,
+      isolatedEnvironment({
+        CODEX_CLAUDE_NOTIFY_DISABLE: "1",
+        CLAUDE_CODE_MESSAGING_TOKEN: "token-without-socket",
+      }),
+    );
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.stdout, "");
+    assert.strictEqual(result.stderr, "");
+  },
+  5000,
+);
 
 test("disabled argv mode exits silently without reading stdin", async () => {
   const result = await runHook(
@@ -922,24 +944,28 @@ test("malformed stdin diagnoses an incomplete messaging environment", async () =
   );
 });
 
-test("stdin read deadline exits when stdin remains open", { timeout: 6000 }, async () => {
-  const startedAt = performance.now();
-  const result = await runHook(
-    "",
-    isolatedEnvironment({ CODEX_CLAUDE_NOTIFY_STDIN_TIMEOUT_MS: "500" }),
-    { closeStdin: false },
-  );
-  const duration = performance.now() - startedAt;
+test(
+  "stdin read deadline exits when stdin remains open",
+  async () => {
+    const startedAt = performance.now();
+    const result = await runHook(
+      "",
+      isolatedEnvironment({ CODEX_CLAUDE_NOTIFY_STDIN_TIMEOUT_MS: "500" }),
+      { closeStdin: false },
+    );
+    const duration = performance.now() - startedAt;
 
-  assert.strictEqual(result.code, 0);
-  assert.strictEqual(result.signal, null);
-  assert.strictEqual(result.stdout, "");
-  assert.strictEqual(
-    result.stderr,
-    "codex-claude-notify: stdin read timed out after 500ms; notification skipped\n",
-  );
-  assert.ok(duration < 2000, `notify hook took ${duration.toFixed(2)}ms to time out`);
-});
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.strictEqual(
+      result.stderr,
+      "codex-claude-notify: stdin read timed out after 500ms; notification skipped\n",
+    );
+    assert.ok(duration < 2000, `notify hook took ${duration.toFixed(2)}ms to time out`);
+  },
+  6000,
+);
 
 test("stdin timeout clamps huge values and defaults invalid values", () => {
   assert.strictEqual(
@@ -954,9 +980,13 @@ test("stdin timeout clamps huge values and defaults invalid values", () => {
   }
 });
 
-test("argv mode ignores invalid notification JSON without messaging environment", async (t) => {
-  for (const cliArgs of [["not-json"], ["--from", "name", "not-json"]]) {
-    await t.test(JSON.stringify(cliArgs), async () => {
+describe("argv mode ignores invalid notification JSON without messaging environment", () => {
+  const cases = [["not-json"], ["--from", "name", "not-json"]];
+
+  test("all cases are registered", () => assert.strictEqual(cases.length, 2));
+
+  for (const cliArgs of cases) {
+    test(JSON.stringify(cliArgs), async () => {
       const result = await runHook("", isolatedEnvironment(), {
         cliArgs,
         closeStdin: false,

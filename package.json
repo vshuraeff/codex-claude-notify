@@ -7,7 +7,7 @@
   },
   "files": ["plugins/"],
   "engines": {
-    "node": ">=20"
+    "bun": ">=1.2"
   },
   "license": "MIT",
   "repository": {
@@ -16,8 +16,8 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node --test test/notify.test.mjs test/version.test.mjs",
-    "preversion": "npm test",
-    "version": "node scripts/sync-version.mjs && git add plugins/codex-claude-notify/.codex-plugin/plugin.json"
+    "test": "bun test",
+    "preversion": "bun test",
+    "version": "bun scripts/sync-version.mjs && git add plugins/codex-claude-notify/.codex-plugin/plugin.json"
   }
 }

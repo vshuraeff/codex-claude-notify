@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 
 import { Buffer } from "node:buffer";
 import { realpathSync } from "node:fs";
@@ -225,7 +225,7 @@ export function notifierFromEnvironment(environment = process.env) {
   return { socketPath, token, timeout: defaultSocketTimeout };
 }
 
-export async function sendMessage(message, notifier) {
+export async function sendMessage(message, notifier, { connect = createConnection } = {}) {
   if (message === "") {
     throw new Error("message must not be empty");
   }
@@ -274,7 +274,7 @@ export async function sendMessage(message, notifier) {
 
     armTimer();
     try {
-      socket = createConnection({ path: notifier.socketPath });
+      socket = connect({ path: notifier.socketPath });
     } catch (error) {
       fail(error);
       return;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { test } from "bun:test";
 
 const packagePath = fileURLToPath(new URL("../package.json", import.meta.url));
 const pluginPath = fileURLToPath(
