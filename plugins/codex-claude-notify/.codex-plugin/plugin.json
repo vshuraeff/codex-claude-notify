@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-notify",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Forwards Codex turn-complete notifications to the Claude Code session that launched Codex, over its messaging socket.",
   "author": {
     "name": "Valentin Shuraeff"

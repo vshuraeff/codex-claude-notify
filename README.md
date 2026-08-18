@@ -142,7 +142,7 @@ If a message never arrives, check in order:
 From a clone of the repository:
 
 ```sh
-node --test test/notify.test.mjs
+npm test
 ```
 
 This is offline and safe to run anywhere.
@@ -152,6 +152,13 @@ bash test/e2e/smoke.sh [persistent-home-dir]
 ```
 
 This is a live test, not offline: it copies `~/.codex/auth.json` into an isolated, throwaway `CODEX_HOME` and runs two real `codex exec` calls, which are billed. It requires an installed and authenticated `codex` CLI, `node`, and `jq`.
+
+## Releases
+
+This project follows [semantic versioning](https://semver.org/); before 1.0, minor version bumps may include breaking changes.
+To cut a release, run `npm version patch|minor|major`, which bumps both `package.json` and `plugin.json` through the version lifecycle script and creates a `vX.Y.Z` tag; then run `git push --follow-tags`.
+Then run `npm publish`. Publishing requires an npm account with publish rights for `codex-claude-notify`; before the first publish, the package is available only from GitHub using the install command above.
+The Codex plugin marketplace picks up git updates automatically; npm users update with `npm update -g codex-claude-notify`.
 
 ## License
 
