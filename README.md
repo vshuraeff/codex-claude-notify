@@ -14,65 +14,62 @@ Delivery uses the per-session Unix domain socket that Claude Code exports to the
 
 ## Install
 
-```sh
-bun add -g codex-claude-notify
-```
+**Pick exactly one delivery path.** This section is the recommended one, the `Stop` hook. The other two paths in this file — the legacy `notify` command below, and the Codex plugin at the end — are alternatives to it, not additions. Codex runs `Stop` hooks before the legacy `notify` command, so configuring both delivers every turn twice.
 
-If the package is not yet available on the registry, install directly from GitHub with the command below; the same command also installs the current `master` instead of the published version:
+1. Install the program:
 
-```sh
-bun add -g github:vshuraeff/codex-claude-notify
-```
+   ```sh
+   bun add -g codex-claude-notify
+   ```
 
-Then register a `Stop` hook in `~/.codex/hooks.json` (`~/.codex` is the default `CODEX_HOME`; adjust if you have overridden it):
+   If the package is not yet available on the registry, install directly from GitHub with the command below; the same command also installs the current `master` instead of the published version:
 
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "codex-claude-notify"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+   ```sh
+   bun add -g github:vshuraeff/codex-claude-notify
+   ```
 
-The nesting matters: `Stop` holds matcher groups, and each group holds its own `hooks` array. A flat entry placed directly in the `Stop` array is ignored without an error message. If the file already exists, merge this `Stop` group into it rather than replacing the file.
+2. Register a `Stop` hook in `$CODEX_HOME/hooks.json`, which is `~/.codex/hooks.json` unless you have overridden `CODEX_HOME`:
 
-Finally, trust the hook once: start interactive `codex`, run `/hooks`, and approve the entry. Trust is Codex's deliberate security gate for running local commands. Until the hook is trusted, headless runs skip it silently — no output, no error. Changing the hook command later invalidates the trust and requires approving it again.
+   ```json
+   {
+     "hooks": {
+       "Stop": [
+         {
+           "hooks": [
+             {
+               "type": "command",
+               "command": "codex-claude-notify"
+             }
+           ]
+         }
+       ]
+     }
+   }
+   ```
 
-## Legacy alternative
+   The nesting matters: `Stop` holds matcher groups, and each group holds its own `hooks` array. A flat entry placed directly in the `Stop` array is ignored without an error message. If the file already exists, merge this `Stop` group into it rather than replacing the file.
 
-Codex's older `notify` mechanism needs no trust step. Set it in `~/.codex/config.toml` (`CODEX_HOME`, as above):
+3. Trust the hook once: start interactive `codex`, run `/hooks`, and approve the entry. Trust is Codex's deliberate security gate for running local commands. Until the hook is trusted, headless runs skip it silently — no output, no error. Changing the hook command later invalidates the trust and requires approving it again.
+
+4. Check that it works. The `/hooks` list should show exactly one `codex-claude-notify` entry. From a Claude Code session, run a short headless job such as `codex exec 'reply with ok'`; when the turn ends, the response arrives in that session's inbox as a message from `codex`. If nothing arrives, work through Troubleshooting.
+
+## Alternative: the legacy `notify` command
+
+This replaces steps 2 and 3 above. Configure it only if you are not using the `Stop` hook.
+
+Codex's older `notify` mechanism needs no trust step. Set it in `$CODEX_HOME/config.toml`:
 
 ```toml
 notify = ["codex-claude-notify"]
 ```
 
-This works immediately, but Codex passes the whole event payload as a single argv argument, which is known to fail on very long final responses (openai/codex#34878).
+It works as soon as step 1 is done, but Codex passes the whole event payload as a single argv argument, which is known to fail silently on very long final responses (openai/codex#34878). That failure mode is why the `Stop` hook is the recommended path.
 
 In this mode a sender name is passed on the command line, so that several Codex runs reporting into one Claude Code session can be told apart:
 
 ```toml
 notify = ["codex-claude-notify", "--from", "reviewer"]
 ```
-
-## Codex plugin
-
-The repository is also a Codex plugin marketplace:
-
-```sh
-codex plugin marketplace add vshuraeff/codex-claude-notify
-codex plugin add codex-claude-notify@codex-claude-notify
-```
-
-Plugin-provided hooks are not executed by published Codex CLI builds — verified on 0.147.0 and 0.148.0-alpha.21, as of 2026-08-18. Installing the plugin today registers it and delivers nothing. Once Codex runs plugin hooks, this becomes the install path that needs no manual `hooks.json` edit.
 
 ## Behavior
 
@@ -138,6 +135,13 @@ If a message never arrives, check in order:
 - For automation or CI where the interactive trust step is unavailable, `codex exec --dangerously-bypass-hook-trust` skips it; use this only against an isolated, disposable `CODEX_HOME`, never a real one.
 - The hook runs as `bun`, resolved from the Codex process's `PATH`. `~/.bun/bin` is normally added to `PATH` by shell rc files, so a Codex process started outside a login shell (a GUI app or a service manager) may not have it and fails with `bun: command not found` on stderr. Fix this by pointing the hook at the full path to `bun` in `hooks.json` or `config.toml`, or by setting `PATH` in the service's own environment.
 
+Two `codex-claude-notify` entries in `/hooks` mean the plugin is installed next to the `hooks.json` hook. Nothing is delivered twice today, because published Codex builds do not execute plugin hooks, but the setup is ambiguous and starts duplicating every notification as soon as upstream does execute them. Keep the `hooks.json` path from Install and remove the plugin:
+
+```sh
+codex plugin remove codex-claude-notify@codex-claude-notify
+codex plugin marketplace remove codex-claude-notify
+```
+
 ## Testing
 
 From a clone of the repository:
@@ -158,8 +162,21 @@ This is a live test, not offline: it copies `~/.codex/auth.json` into an isolate
 
 This project follows [semantic versioning](https://semver.org/); before 1.0, minor version bumps may include breaking changes.
 To cut a release, run `bun pm version patch|minor|major`, which bumps both `package.json` and `plugin.json` through the version lifecycle script and creates a `vX.Y.Z` tag; then run `git push --follow-tags`. `bun pm version` requires Bun 1.2.19 or newer; this is a maintainer-tooling requirement, separate from the runtime requirement in Requirements.
-Then run `bun publish`. Publishing requires an npm registry account with publish rights for the package; before the first publish, the package is available only from GitHub using the install command above.
+Then run `bun publish`. Publishing requires a registry account with publish rights for the package; before the first publish, the package is available only from GitHub using the install command above.
 The Codex plugin marketplace picks up git updates automatically; bun users update by re-running `bun add -g codex-claude-notify`.
+
+## Native plugin status: not functional yet
+
+The repository is also a Codex plugin marketplace, and these commands do install the plugin:
+
+```sh
+codex plugin marketplace add vshuraeff/codex-claude-notify
+codex plugin add codex-claude-notify@codex-claude-notify
+```
+
+Published Codex CLI builds do not execute plugin-provided hooks — verified on 0.147.0 and 0.148.0-alpha.21, as of 2026-08-18. Installing the plugin today registers it and delivers nothing.
+
+So do not install it expecting notifications, and do not keep it alongside the `hooks.json` path from Install: once Codex runs plugin hooks, that machine delivers every turn twice. The plugin is here as future-proofing — when upstream executes plugin hooks, this becomes the install path that needs no manual `hooks.json` edit.
 
 ## License
 
