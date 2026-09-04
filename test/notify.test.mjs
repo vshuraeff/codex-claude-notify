@@ -2,9 +2,18 @@ import assert from "node:assert";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { cpSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
+import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -12,8 +21,10 @@ import { describe, test } from "bun:test";
 
 import {
   buildEnvelope,
+  dedupeMarkerPath,
   envelopeFromStopPayload,
   escapeXMLAttribute,
+  hasFreshDedupeMarker,
   maximumMessageBytes,
   maximumSummaryEscapedBytes,
   maximumStdinBytes,
@@ -29,6 +40,7 @@ import {
   teammateMessageOpenTagPrefix,
   teammateMessageOpenTagSuffix,
   truncateUTF8,
+  writeDedupeMarker,
 } from "../plugins/codex-claude-notify/hooks/notify.mjs";
 
 const notifyScriptPath = fileURLToPath(
@@ -252,6 +264,374 @@ function assertDeliveredFrames(frames, token, envelope) {
     },
   ]);
 }
+
+test("argv --from mode writes a fresh dedupe marker", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = notifyPayload();
+  const token = "dedupe-marker-token";
+  const environment = isolatedEnvironment({ XDG_RUNTIME_DIR: runtimeDirectory });
+  try {
+    const { frames } = await runDeliveredHook({
+      cliArgs: ["--from", "builder", JSON.stringify(payload)],
+      environment,
+      token,
+    });
+
+    assertDeliveredFrames(
+      frames,
+      token,
+      buildEnvelope({
+        threadID: payload["thread-id"],
+        cwd: payload.cwd,
+        lastAssistantMessage: payload["last-assistant-message"],
+        teammateName: "builder",
+      }),
+    );
+    assert.strictEqual(hasFreshDedupeMarker(payload["thread-id"], environment), true);
+  } finally {
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("argv --from delivery suppresses the following Stop-hook delivery", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = notifyPayload({ "thread-id": "thread-from-first" });
+  const threadID = payload["thread-id"];
+  const token = "from-first-token";
+  const socketPath = `${runtimeDirectory}/claude-code.sock`;
+  let connectionCount = 0;
+  const server = createServer(() => {
+    connectionCount++;
+  });
+  try {
+    const { frames } = await runDeliveredHook({
+      cliArgs: ["--from", "builder", JSON.stringify(payload)],
+      environment: { XDG_RUNTIME_DIR: runtimeDirectory },
+      token,
+    });
+    assertDeliveredFrames(
+      frames,
+      token,
+      buildEnvelope({
+        threadID,
+        cwd: payload.cwd,
+        lastAssistantMessage: payload["last-assistant-message"],
+        teammateName: "builder",
+      }),
+    );
+    assert.strictEqual(
+      hasFreshDedupeMarker(threadID, { XDG_RUNTIME_DIR: runtimeDirectory }),
+      true,
+    );
+
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    const result = await runHook(
+      JSON.stringify(stopPayload({ session_id: threadID })),
+      isolatedEnvironment({
+        XDG_RUNTIME_DIR: runtimeDirectory,
+        CLAUDE_CODE_MESSAGING_SOCKET: `uds:${socketPath}`,
+        CLAUDE_CODE_MESSAGING_TOKEN: token,
+      }),
+    );
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.strictEqual(result.stderr, "");
+    assert.strictEqual(connectionCount, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("marker claim filesystem errors do not suppress Stop-hook delivery", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = stopPayload({ session_id: "thread-marker-claim-error" });
+  const environment = { XDG_RUNTIME_DIR: runtimeDirectory };
+  const markerPath = dedupeMarkerPath(payload.session_id, environment);
+  const markerDirectory = dirname(markerPath);
+  const token = "marker-claim-error-token";
+  try {
+    writeDedupeMarker(payload.session_id, environment);
+    rmSync(markerPath);
+    chmodSync(markerDirectory, 0o500);
+
+    const { frames } = await runDeliveredHook({
+      input: JSON.stringify(payload),
+      environment,
+      token,
+    });
+    assertDeliveredFrames(frames, token, envelopeFromStopPayload(payload));
+  } finally {
+    chmodSync(markerDirectory, 0o700);
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("Stop-hook delivery suppresses the following argv --from delivery", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = notifyPayload({ "thread-id": "thread-stop-first" });
+  const threadID = payload["thread-id"];
+  const stopHookPayload = stopPayload({ session_id: threadID });
+  const token = "stop-first-token";
+  const socketPath = `${runtimeDirectory}/claude-code.sock`;
+  let connectionCount = 0;
+  const server = createServer(() => {
+    connectionCount++;
+  });
+  try {
+    const { frames } = await runDeliveredHook({
+      input: JSON.stringify(stopHookPayload),
+      environment: { XDG_RUNTIME_DIR: runtimeDirectory },
+      token,
+    });
+    assertDeliveredFrames(frames, token, envelopeFromStopPayload(stopHookPayload));
+    assert.strictEqual(
+      hasFreshDedupeMarker(threadID, { XDG_RUNTIME_DIR: runtimeDirectory }),
+      true,
+    );
+
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    const result = await runHook(
+      "",
+      isolatedEnvironment({
+        XDG_RUNTIME_DIR: runtimeDirectory,
+        CLAUDE_CODE_MESSAGING_SOCKET: `uds:${socketPath}`,
+        CLAUDE_CODE_MESSAGING_TOKEN: token,
+      }),
+      { cliArgs: ["--from", "builder", JSON.stringify(payload)] },
+    );
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.strictEqual(result.stderr, "");
+    assert.strictEqual(connectionCount, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("two Stop-hook deliveries for one session both send", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = stopPayload({ session_id: "thread-stop-only" });
+  const environment = { XDG_RUNTIME_DIR: runtimeDirectory };
+  const firstToken = "stop-only-first-token";
+  const secondToken = "stop-only-second-token";
+  try {
+    const { frames: firstFrames } = await runDeliveredHook({
+      input: JSON.stringify(payload),
+      environment,
+      token: firstToken,
+    });
+    assertDeliveredFrames(firstFrames, firstToken, envelopeFromStopPayload(payload));
+    assert.strictEqual(hasFreshDedupeMarker(payload.session_id, environment), true);
+
+    const { frames: secondFrames } = await runDeliveredHook({
+      input: JSON.stringify(payload),
+      environment,
+      token: secondToken,
+    });
+    assertDeliveredFrames(secondFrames, secondToken, envelopeFromStopPayload(payload));
+  } finally {
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("fresh dedupe marker skips Stop-hook delivery", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const socketPath = `${runtimeDirectory}/claude-code.sock`;
+  let connectionCount = 0;
+  const server = createServer(() => {
+    connectionCount++;
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    const payload = stopPayload();
+    const environment = isolatedEnvironment({
+      XDG_RUNTIME_DIR: runtimeDirectory,
+      CLAUDE_CODE_MESSAGING_SOCKET: `uds:${socketPath}`,
+      CLAUDE_CODE_MESSAGING_TOKEN: "dedupe-stop-token",
+    });
+    writeDedupeMarker(payload.session_id, environment);
+
+    const result = await runHook(JSON.stringify(payload), environment);
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.strictEqual(result.stderr, "");
+    assert.strictEqual(connectionCount, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("stale dedupe marker is reclaimed before Stop-hook delivery", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = stopPayload({ session_id: "thread-stale-marker-delivery" });
+  const environment = { XDG_RUNTIME_DIR: runtimeDirectory };
+  const markerPath = dedupeMarkerPath(payload.session_id, environment);
+  const token = "stale-marker-delivery-token";
+  try {
+    writeDedupeMarker(payload.session_id, environment);
+    writeFileSync(markerPath, `stop:${Date.now() + 3_600_000}`, { mode: 0o600 });
+
+    const { frames } = await runDeliveredHook({
+      input: JSON.stringify(payload),
+      environment,
+      token,
+    });
+    assertDeliveredFrames(frames, token, envelopeFromStopPayload(payload));
+    assert.strictEqual(hasFreshDedupeMarker(payload.session_id, environment), true);
+  } finally {
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("Stop-hook delivery without a dedupe marker is unchanged", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = stopPayload();
+  const token = "no-dedupe-marker-token";
+  try {
+    const { frames } = await runDeliveredHook({
+      input: JSON.stringify(payload),
+      environment: { XDG_RUNTIME_DIR: runtimeDirectory },
+      token,
+    });
+
+    assertDeliveredFrames(frames, token, envelopeFromStopPayload(payload));
+  } finally {
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("failed argv --from delivery removes its dedupe marker", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = notifyPayload({ "thread-id": "thread-failed-delivery" });
+  const threadID = payload["thread-id"];
+  const environment = isolatedEnvironment({
+    XDG_RUNTIME_DIR: runtimeDirectory,
+    CLAUDE_CODE_MESSAGING_SOCKET: `uds:${runtimeDirectory}/unreachable.sock`,
+    CLAUDE_CODE_MESSAGING_TOKEN: "failed-delivery-token",
+  });
+  try {
+    const result = await runHook("", environment, {
+      cliArgs: ["--from", "builder", JSON.stringify(payload)],
+      closeStdin: false,
+    });
+    assert.strictEqual(result.code, 0);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(result.stdout, "");
+    assert.match(result.stderr, /^codex-claude-notify: notify Claude Code: .+\n$/);
+    assert.strictEqual(hasFreshDedupeMarker(threadID, environment), false);
+
+    const stopHookPayload = stopPayload({ session_id: threadID });
+    const token = "post-failure-stop-token";
+    const { frames } = await runDeliveredHook({
+      input: JSON.stringify(stopHookPayload),
+      environment: { XDG_RUNTIME_DIR: runtimeDirectory },
+      token,
+    });
+    assertDeliveredFrames(frames, token, envelopeFromStopPayload(stopHookPayload));
+  } finally {
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("fresh dedupe marker suppresses only one Stop-hook delivery", async () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const payload = notifyPayload({ "thread-id": "thread-single-stop-skip" });
+  const threadID = payload["thread-id"];
+  const token = "single-stop-skip-token";
+  const socketPath = `${runtimeDirectory}/claude-code.sock`;
+  let connectionCount = 0;
+  const server = createServer(() => {
+    connectionCount++;
+  });
+  try {
+    await runDeliveredHook({
+      cliArgs: ["--from", "builder", JSON.stringify(payload)],
+      environment: { XDG_RUNTIME_DIR: runtimeDirectory },
+      token,
+    });
+    assert.strictEqual(
+      hasFreshDedupeMarker(threadID, { XDG_RUNTIME_DIR: runtimeDirectory }),
+      true,
+    );
+
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+
+    const stopHookPayload = stopPayload({ session_id: threadID });
+    const stopEnvironment = isolatedEnvironment({
+      XDG_RUNTIME_DIR: runtimeDirectory,
+      CLAUDE_CODE_MESSAGING_SOCKET: `uds:${socketPath}`,
+      CLAUDE_CODE_MESSAGING_TOKEN: "single-stop-skip-token",
+    });
+    const firstResult = await runHook(JSON.stringify(stopHookPayload), stopEnvironment);
+    assert.strictEqual(firstResult.code, 0);
+    assert.strictEqual(firstResult.signal, null);
+    assert.strictEqual(firstResult.stdout, "");
+    assert.strictEqual(firstResult.stderr, "");
+    assert.strictEqual(connectionCount, 0);
+    assert.strictEqual(hasFreshDedupeMarker(threadID, stopEnvironment), false);
+
+    const secondToken = "second-stop-delivery-token";
+    const { frames } = await runDeliveredHook({
+      input: JSON.stringify(stopHookPayload),
+      environment: { XDG_RUNTIME_DIR: runtimeDirectory },
+      token: secondToken,
+    });
+    assertDeliveredFrames(frames, secondToken, envelopeFromStopPayload(stopHookPayload));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("future-dated dedupe marker is stale and pruned", () => {
+  const runtimeDirectory = mkdtempSync(`${tmpdir()}/codex-claude-notify-test-`);
+  const environment = { XDG_RUNTIME_DIR: runtimeDirectory };
+  const threadID = "thread-future-marker";
+  const markerPath = dedupeMarkerPath(threadID, environment);
+  try {
+    writeDedupeMarker(threadID, environment);
+    writeFileSync(markerPath, String(Date.now() + 3_600_000), { mode: 0o600 });
+
+    assert.strictEqual(hasFreshDedupeMarker(threadID, environment), false);
+    writeDedupeMarker("thread-prune-trigger", environment);
+    assert.strictEqual(existsSync(markerPath), false);
+  } finally {
+    rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+});
 
 test("notification message", () => {
   const actual = envelopeFromStopPayload(stopPayload());
@@ -700,10 +1080,6 @@ describe("zero arguments select stdin mode across script path variants", () => {
       },
     },
   ];
-  const payload = stopPayload({
-    last_assistant_message: "Delivered from spawned stdin mode.",
-  });
-  const expectedEnvelope = envelopeFromStopPayload(payload);
   const token = 'stdin-token-"exact"';
 
   test("all cases are registered", () => assert.strictEqual(variants.length, 3));
@@ -713,14 +1089,19 @@ describe("zero arguments select stdin mode across script path variants", () => {
       variant.name,
       async () => {
         const variantRoot = mkdtempSync(`${tmpdir()}/ccn-script-variants-`);
+        const variantPayload = stopPayload({
+          session_id: `thread-stdin-variant-${process.pid}-${socketSequence++}`,
+          last_assistant_message: "Delivered from spawned stdin mode.",
+        });
+        const variantExpectedEnvelope = envelopeFromStopPayload(variantPayload);
         try {
           const scriptPath = variant.scriptPath(variantRoot);
           const { frames } = await runDeliveredHook({
-            input: JSON.stringify(payload),
+            input: JSON.stringify(variantPayload),
             scriptPath,
             token,
           });
-          assertDeliveredFrames(frames, token, expectedEnvelope);
+          assertDeliveredFrames(frames, token, variantExpectedEnvelope);
         } finally {
           rmSync(variantRoot, { recursive: true, force: true });
         }
@@ -1016,7 +1397,7 @@ test("argv mode diagnoses invalid notification JSON with messaging environment",
 
 test("unreachable messaging socket produces one diagnostic", async () => {
   const result = await runHook(
-    JSON.stringify(stopPayload()),
+    JSON.stringify(stopPayload({ session_id: `thread-unreachable-${process.pid}` })),
     isolatedEnvironment({
       CLAUDE_CODE_MESSAGING_SOCKET: `${tmpdir()}/ccn-${process.pid}-${socketSequence++}.sock`,
       CLAUDE_CODE_MESSAGING_TOKEN: "session-token",
@@ -1033,6 +1414,7 @@ test("unreachable messaging socket produces one diagnostic", async () => {
 
 test("argv mode ignores unknown leading arguments", async () => {
   const payload = notifyPayload({
+    "thread-id": `thread-unknown-leading-${process.pid}`,
     "last-assistant-message": "Unknown leading arguments were ignored.",
   });
   const expectedEnvelope = buildEnvelope({
@@ -1053,6 +1435,7 @@ test("argv mode ignores unknown leading arguments", async () => {
 
 test("argv mode ignores a dangling from flag", async () => {
   const payload = notifyPayload({
+    "thread-id": `thread-dangling-from-${process.pid}`,
     "last-assistant-message": "The dangling flag was ignored.",
   });
   const expectedEnvelope = buildEnvelope({
@@ -1073,6 +1456,7 @@ test("argv mode ignores a dangling from flag", async () => {
 
 test("argv mode uses teammate id from --from flag", async () => {
   const payload = notifyPayload({
+    "thread-id": `thread-from-flag-${process.pid}`,
     "last-assistant-message": "The --from flag supplied the teammate id.",
   });
   const expectedEnvelope = buildEnvelope({
@@ -1091,6 +1475,7 @@ test("argv mode uses teammate id from --from flag", async () => {
 
 test("argv mode uses teammate id from CODEX_CLAUDE_NOTIFY_FROM env when no flag is given", async () => {
   const payload = notifyPayload({
+    "thread-id": `thread-from-environment-${process.pid}`,
     "last-assistant-message": "The environment supplied the teammate id.",
   });
   const expectedEnvelope = buildEnvelope({
@@ -1110,6 +1495,7 @@ test("argv mode uses teammate id from CODEX_CLAUDE_NOTIFY_FROM env when no flag 
 
 test("argv mode prefers --from flag over CODEX_CLAUDE_NOTIFY_FROM env", async () => {
   const payload = notifyPayload({
+    "thread-id": `thread-from-precedence-${process.pid}`,
     "last-assistant-message": "The flag took precedence over the environment.",
   });
   const expectedEnvelope = buildEnvelope({

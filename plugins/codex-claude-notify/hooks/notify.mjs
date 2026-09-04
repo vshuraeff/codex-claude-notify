@@ -1,8 +1,19 @@
 #!/usr/bin/env bun
 
 import { Buffer } from "node:buffer";
-import { realpathSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import process from "node:process";
 import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath } from "node:url";
@@ -24,6 +35,159 @@ const truncationSuffix = "\n\n[notification truncated]";
 const truncationSuffixBytes = Buffer.byteLength(truncationSuffix, "utf8");
 const unicodeWhitespacePattern = /^\p{White_Space}$/u;
 const closingTeammateMessageTagPattern = /<\/teammate-message[\t\n\r ]*>/g;
+const dedupeMarkerTTLMillis = 60_000;
+const maxDedupeMarkersPrunedPerCall = 64;
+const dedupeMarkerDirectoryName = "codex-claude-notify-dedupe";
+
+function dedupeMarkerDirectory(environment) {
+  const runtimeDirectory = stringValue(environment.XDG_RUNTIME_DIR);
+  return join(runtimeDirectory === "" ? tmpdir() : runtimeDirectory, dedupeMarkerDirectoryName);
+}
+
+function dedupeMarkerFilename(threadID) {
+  const normalizedThreadID = trimUnicodeWhitespace(stringValue(threadID));
+  const sanitizedThreadID = normalizedThreadID.replace(/[^A-Za-z0-9._-]/g, "");
+  if (sanitizedThreadID === "" || sanitizedThreadID === "." || sanitizedThreadID === "..") {
+    return "";
+  }
+
+  const encodedThreadID = Buffer.from(normalizedThreadID, "utf8").toString("hex");
+  return encodedThreadID.length <= 255 ? encodedThreadID : "";
+}
+
+export function dedupeMarkerPath(threadID, environment) {
+  const filename = dedupeMarkerFilename(threadID);
+  return filename === "" ? "" : join(dedupeMarkerDirectory(environment), filename);
+}
+
+function dedupeMarkerTimestamp(value) {
+  const separatorIndex = value.indexOf(":");
+  const timestampValue = separatorIndex === -1 ? value : value.slice(separatorIndex + 1);
+  if (!/^\d+$/.test(timestampValue)) {
+    return null;
+  }
+  const timestamp = Number(timestampValue);
+  return Number.isSafeInteger(timestamp) ? timestamp : null;
+}
+
+function dedupeMarkerSender(value) {
+  const separatorIndex = value.indexOf(":");
+  return separatorIndex > 0 && dedupeMarkerTimestamp(value) !== null
+    ? value.slice(0, separatorIndex)
+    : "";
+}
+
+function isFreshDedupeMarkerValue(value, now) {
+  const timestamp = dedupeMarkerTimestamp(value);
+  const elapsed = now - timestamp;
+  return timestamp !== null && elapsed >= 0 && elapsed < dedupeMarkerTTLMillis;
+}
+
+function dedupeMarkerValue(sender, now) {
+  const normalizedSender = stringValue(sender);
+  return normalizedSender === "" ? String(now) : `${normalizedSender}:${now}`;
+}
+
+function pruneDedupeMarkers(directory, now) {
+  let filenames;
+  try {
+    filenames = readdirSync(directory);
+  } catch {
+    return;
+  }
+
+  for (const filename of filenames.slice(0, maxDedupeMarkersPrunedPerCall)) {
+    try {
+      const timestamp = dedupeMarkerTimestamp(
+        readFileSync(join(directory, filename), "utf8"),
+      );
+      if (
+        timestamp === null ||
+        now - timestamp > dedupeMarkerTTLMillis ||
+        timestamp > now
+      ) {
+        unlinkSync(join(directory, filename));
+      }
+    } catch {}
+  }
+}
+
+export function writeDedupeMarker(threadID, environment = process.env) {
+  try {
+    const markerPath = dedupeMarkerPath(threadID, environment);
+    if (markerPath === "") {
+      return;
+    }
+
+    const directory = dedupeMarkerDirectory(environment);
+    const now = Date.now();
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(markerPath, String(now), { mode: 0o600 });
+    pruneDedupeMarkers(directory, now);
+  } catch {}
+}
+
+export function claimDedupeMarker(threadID, environment = process.env, sender = "") {
+  try {
+    const markerPath = dedupeMarkerPath(threadID, environment);
+    if (markerPath === "") {
+      return true;
+    }
+
+    const directory = dedupeMarkerDirectory(environment);
+    const markerSender = stringValue(sender);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let fileDescriptor;
+      try {
+        fileDescriptor = openSync(markerPath, "wx", 0o600);
+      } catch (error) {
+        if (error?.code !== "EEXIST") {
+          return true;
+        }
+        let markerValue;
+        try {
+          markerValue = readFileSync(markerPath, "utf8");
+        } catch {
+          return true;
+        }
+        if (
+          isFreshDedupeMarkerValue(markerValue, Date.now()) &&
+          (markerSender === "" || dedupeMarkerSender(markerValue) !== markerSender)
+        ) {
+          return false;
+        }
+        try {
+          unlinkSync(markerPath);
+        } catch {}
+        continue;
+      }
+
+      const now = Date.now();
+      try {
+        writeFileSync(fileDescriptor, dedupeMarkerValue(markerSender, now));
+      } finally {
+        closeSync(fileDescriptor);
+      }
+      pruneDedupeMarkers(directory, now);
+      return true;
+    }
+  } catch {}
+  return true;
+}
+
+export function hasFreshDedupeMarker(threadID, environment = process.env) {
+  try {
+    const markerPath = dedupeMarkerPath(threadID, environment);
+    if (markerPath === "") {
+      return false;
+    }
+
+    return isFreshDedupeMarkerValue(readFileSync(markerPath, "utf8"), Date.now());
+  } catch {
+    return false;
+  }
+}
 
 function stringValue(value) {
   return typeof value === "string" ? value : "";
@@ -353,8 +517,30 @@ function writeDiagnostic(stream, error) {
 async function deliverEnvelope(envelope, notifier, stderr) {
   try {
     await sendMessage(envelope, notifier);
+    return true;
   } catch (error) {
     writeDiagnostic(stderr, new Error(`notify Claude Code: ${errorMessage(error)}`));
+    return false;
+  }
+}
+
+function removeDedupeMarker(threadID, environment) {
+  try {
+    const markerPath = dedupeMarkerPath(threadID, environment);
+    if (markerPath !== "") {
+      unlinkSync(markerPath);
+    }
+  } catch {}
+}
+
+function threadIDFromNotifyArguments(cliArgs) {
+  try {
+    const payload = JSON.parse(cliArgs.at(-1));
+    return payload !== null && typeof payload === "object" && payload.type === "agent-turn-complete"
+      ? payload["thread-id"]
+      : "";
+  } catch {
+    return "";
   }
 }
 
@@ -422,7 +608,14 @@ export async function mainFromNotifyArguments(
     return;
   }
 
-  await deliverEnvelope(envelope, notifier, stderr);
+  const threadID = threadIDFromNotifyArguments(cliArgs);
+  if (!claimDedupeMarker(threadID, environment, "from")) {
+    removeDedupeMarker(threadID, environment);
+    return;
+  }
+  if (!(await deliverEnvelope(envelope, notifier, stderr))) {
+    removeDedupeMarker(threadID, environment);
+  }
 }
 
 export async function main({
@@ -484,7 +677,14 @@ export async function main({
     return;
   }
 
-  await deliverEnvelope(envelope, notifier, stderr);
+  if (!claimDedupeMarker(payload.session_id, environment, "stop")) {
+    removeDedupeMarker(payload.session_id, environment);
+    return;
+  }
+
+  if (!(await deliverEnvelope(envelope, notifier, stderr))) {
+    removeDedupeMarker(payload.session_id, environment);
+  }
 }
 
 let isDirect = false;
