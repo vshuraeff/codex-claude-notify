@@ -1,7 +1,7 @@
 {
   "name": "codex-claude-notify",
-  "version": "0.1.0",
-  "description": "Forwards Codex turn-complete notifications to the Claude Code session that launched Codex, over its messaging socket.",
+  "version": "0.1.2",
+  "description": "Delivers Codex turn completions as native peer notifications to the launching Claude Code session over its authenticated Unix socket.",
   "author": {
     "name": "Valentin Shuraeff"
   },
@@ -9,8 +9,8 @@
   "repository": "https://github.com/vshuraeff/codex-claude-notify",
   "interface": {
     "displayName": "Codex Claude Notify",
-    "shortDescription": "Forwards Codex completion notifications to Claude Code.",
-    "longDescription": "Forwards Codex agent turn completion messages to the launching Claude Code session over its authenticated Unix messaging socket.",
+    "shortDescription": "Native Codex completion notifications in Claude Code.",
+    "longDescription": "Delivers the final Codex response to the launching Claude Code session as a native named-peer notification. Uses an authenticated Unix socket, preserves UTF-8 within a 64 KiB message limit, and supports a configured Stop hook or legacy notify command. See the README for plugin-hook compatibility and installation requirements.",
     "developerName": "Valentin Shuraeff",
     "category": "Productivity",
     "capabilities": [

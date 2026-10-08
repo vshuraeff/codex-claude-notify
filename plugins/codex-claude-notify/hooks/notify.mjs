@@ -3,9 +3,12 @@
 import { Buffer } from "node:buffer";
 import {
   closeSync,
+  constants as fsConstants,
+  fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   unlinkSync,
@@ -19,12 +22,7 @@ import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath } from "node:url";
 
 export const messagePrefix = "[Codex turn complete] ";
-export const teammateMessageOpenTagPrefix = '<teammate-message teammate_id="';
-export const teammateMessageIDSuffix = '" summary="';
-export const teammateMessageOpenTagSuffix = '">\n';
-export const teammateMessageCloseTag = "\n</teammate-message>";
-export const maximumSummaryRunes = 200;
-export const maximumSummaryEscapedBytes = maximumSummaryRunes * 6;
+export const senderPrefix = "from=";
 export const maximumTeammateNameRunes = 64;
 export const maximumMessageBytes = 64 * 1024;
 export const maximumStdinBytes = 8 * 1024 * 1024;
@@ -33,8 +31,19 @@ const defaultStdinTimeout = 30000;
 const maximumStdinTimeout = 2_147_483_647;
 const truncationSuffix = "\n\n[notification truncated]";
 const truncationSuffixBytes = Buffer.byteLength(truncationSuffix, "utf8");
+const crossSessionCloseTag = "\n</cross-session-message>";
+// claude also recognizes closing tags with unicode brackets or invisible marks.
+const openingBrackets = "<\uFF1C\uFE64\u2329\u27E8\u3008\u2039\u02C2\u1438\u276C\u276E\u2770\u29FC\u226E\u227A\u22D6";
+const closingBrackets = ">\uFF1E\uFE65\u232A\u27E9\u3009\u203A\u02C3\u1433\u276D\u276F\u2771\u29FD\u226F\u227B\u22D7";
+const slashes = "/\uFF0F\u2215\u2044";
+const tagFiller = `^A-Za-z0-9_\\-${openingBrackets}${closingBrackets}`;
+const closingPeerTag = new RegExp(
+  `[${openingBrackets}](?!\\\\)(?=[${tagFiller}${slashes}]*[${slashes}][${tagFiller}]*` +
+    [..."cross-session-message"].join("[\\p{C}\\p{M}\\p{Zl}\\p{Zp}\\p{Default_Ignorable_Code_Point}]*") +
+    ")",
+  "giu",
+);
 const unicodeWhitespacePattern = /^\p{White_Space}$/u;
-const closingTeammateMessageTagPattern = /<\/teammate-message[\t\n\r ]*>/g;
 const dedupeMarkerTTLMillis = 60_000;
 const maxDedupeMarkersPrunedPerCall = 64;
 const dedupeMarkerDirectoryName = "codex-claude-notify-dedupe";
@@ -223,10 +232,6 @@ function trimUnicodeWhitespace(value) {
   return value.slice(start, end);
 }
 
-function neutralizeClosingTeammateMessageTags(value) {
-  return value.replace(closingTeammateMessageTagPattern, "&lt;/teammate-message&gt;");
-}
-
 function collapseUnicodeWhitespace(value) {
   return value.split(/\p{White_Space}+/u).filter(Boolean).join(" ");
 }
@@ -240,25 +245,12 @@ export function normalizeTeammateName(value) {
   return clampCodePoints(collapseUnicodeWhitespace(stringValue(value)), maximumTeammateNameRunes);
 }
 
-export function escapeXMLAttribute(value) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-export function notificationSummary(body) {
-  let summary = "";
-  for (const bodyLine of body.split("\n")) {
-    const line = trimUnicodeWhitespace(bodyLine);
-    if (line !== "") {
-      summary = collapseUnicodeWhitespace(line);
-      break;
-    }
-  }
-
-  return escapeXMLAttribute(clampCodePoints(summary, maximumSummaryRunes));
+function neutralizeEnvelopeTags(value) {
+  // include tag-name prefixes so truncation cannot create a new closing tag.
+  return value.replace(closingPeerTag, "<\\").replace(
+    /<\/?(?:cross-session-message|teammate-message|agent-message)/gi,
+    (tag) => `<\\${tag.slice(1)}`,
+  );
 }
 
 export function notificationMetadata(threadID, cwd) {
@@ -300,61 +292,42 @@ export function buildEnvelope({
   teammateName = "",
 } = {}) {
   const normalizedTeammateName = normalizeTeammateName(teammateName);
-  const teammateID = normalizedTeammateName === "" ? "codex" : `codex:${normalizedTeammateName}`;
-  const openTag =
-    teammateMessageOpenTagPrefix + escapeXMLAttribute(teammateID) + teammateMessageIDSuffix;
+  const sender = normalizedTeammateName === "" ? "codex" : `codex:${normalizedTeammateName}`;
+  // claude's peer parser round-trips this name without decoding xml entities.
+  const displayName = clampCodePoints(
+    sender.replace(/["<>\p{Cf}\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/gu, "").trim(),
+    maximumTeammateNameRunes,
+  ).trimEnd();
+  const openTag = `<cross-session-message from="codex" from-name="${displayName}">\n`;
+  const header = neutralizeEnvelopeTags(`${messagePrefix}${senderPrefix}${sender}\n`);
 
-  let lastMessage = trimUnicodeWhitespace(
-    neutralizeClosingTeammateMessageTags(stringValue(lastAssistantMessage)),
-  );
+  let lastMessage = neutralizeEnvelopeTags(trimUnicodeWhitespace(stringValue(lastAssistantMessage)));
   if (lastMessage === "") {
     lastMessage = "The Codex turn finished without a final assistant message.";
   }
 
-  const envelopeReserve =
-    Buffer.byteLength(openTag, "utf8") +
-    maximumSummaryEscapedBytes +
-    Buffer.byteLength(teammateMessageOpenTagSuffix, "utf8") +
-    Buffer.byteLength(teammateMessageCloseTag, "utf8");
-  const bodyLimit = maximumMessageBytes - envelopeReserve;
-  const metadata = notificationMetadata(
-    neutralizeClosingTeammateMessageTags(stringValue(threadID)),
-    neutralizeClosingTeammateMessageTags(stringValue(cwd)),
-  );
+  const bodyLimit = maximumMessageBytes - Buffer.byteLength(openTag + header + crossSessionCloseTag, "utf8");
+  const metadata = neutralizeEnvelopeTags(notificationMetadata(threadID, cwd));
   const metadataParagraph = metadata === "" ? "" : `\n\n${metadata}`;
   const messageLimit = Math.max(0, bodyLimit - Buffer.byteLength(metadataParagraph, "utf8"));
 
   let message = "";
   if (messageLimit > 0) {
-    const candidate = messagePrefix + lastMessage;
-    if (Buffer.byteLength(candidate, "utf8") <= messageLimit) {
-      message = candidate;
+    if (Buffer.byteLength(lastMessage, "utf8") <= messageLimit) {
+      message = lastMessage;
     } else if (messageLimit > truncationSuffixBytes) {
-      message = truncateUTF8(candidate, messageLimit);
+      message = truncateUTF8(lastMessage, messageLimit);
     }
   }
-  // neutralization grows text; truncation keeps a safe prefix and tag-free suffix
-  // and therefore cannot recreate a closing tag
-  const body = message + metadataParagraph;
-  const envelope =
-    openTag +
-    notificationSummary(body) +
-    teammateMessageOpenTagSuffix +
-    body +
-    teammateMessageCloseTag;
-  const envelopeBytes = Buffer.byteLength(envelope, "utf8");
-  if (envelopeBytes > maximumMessageBytes) {
+
+  const notification = openTag + header + message + metadataParagraph + crossSessionCloseTag;
+  const notificationBytes = Buffer.byteLength(notification, "utf8");
+  if (notificationBytes > maximumMessageBytes) {
     throw new Error(
-      `notification envelope exceeds ${maximumMessageBytes}-byte limit (${envelopeBytes} bytes)`,
+      `notification exceeds ${maximumMessageBytes}-byte limit (${notificationBytes} bytes)`,
     );
   }
-  const closingTagCount = envelope.split("</teammate-message>").length - 1;
-  if (closingTagCount !== 1) {
-    throw new Error(
-      `notification envelope must contain exactly one closing teammate-message tag; found ${closingTagCount}`,
-    );
-  }
-  return envelope;
+  return notification;
 }
 
 export function envelopeFromStopPayload(payload, teammateName = "") {
@@ -368,6 +341,90 @@ export function envelopeFromStopPayload(payload, teammateName = "") {
     lastAssistantMessage: payload.last_assistant_message,
     teammateName,
   });
+}
+
+// the first rollout record is session_meta; a real peer header measured 22,711 bytes.
+export const maximumTranscriptHeaderBytes = 1024 * 1024;
+
+export function readTranscriptHeader(transcriptPath) {
+  if (typeof transcriptPath !== "string" || transcriptPath === "") {
+    return null;
+  }
+  let fd;
+  try {
+    // nonblocking open keeps a fifo planted at the path from hanging the hook
+    fd = openSync(transcriptPath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch {
+    return null;
+  }
+  try {
+    if (!fstatSync(fd).isFile()) {
+      return null;
+    }
+    const buffer = Buffer.alloc(maximumTranscriptHeaderBytes);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, length);
+      if (read === 0) {
+        break;
+      }
+      const newline = buffer.subarray(length, length + read).indexOf(0x0a);
+      if (newline !== -1) {
+        return buffer.toString("utf8", 0, length + newline);
+      }
+      length += read;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// CODEX_CLAUDE_NOTIFY_SOURCES, a comma list of rollout sources ("cli" for the
+// interactive tui, "exec" for codex exec), restricts Stop delivery to sessions
+// whose rollout header records one of them. unset or empty delivers for every
+// session. a launcher sets it so that processes its session starts, which
+// inherit the environment, stay silent.
+export function allowedSourcesFromEnvironment(environment = process.env) {
+  const sources = stringValue(environment.CODEX_CLAUDE_NOTIFY_SOURCES)
+    .split(",")
+    .map((source) => source.trim())
+    .filter((source) => source !== "");
+  return sources.length === 0 ? null : sources;
+}
+
+export function isAllowedStopPayload(payload, allowedSources) {
+  if (payload === null || typeof payload !== "object" || payload.hook_event_name !== "Stop") {
+    return false;
+  }
+  if (allowedSources === null) {
+    return true;
+  }
+  const sessionID = stringValue(payload.session_id).toLowerCase();
+  if (sessionID === "") {
+    return false;
+  }
+  const header = readTranscriptHeader(payload.transcript_path);
+  if (header === null) {
+    return false;
+  }
+  let record;
+  try {
+    record = JSON.parse(header);
+  } catch {
+    return false;
+  }
+  const meta = record?.payload;
+  return (
+    record?.type === "session_meta" &&
+    meta !== null &&
+    typeof meta === "object" &&
+    typeof meta.source === "string" &&
+    allowedSources.includes(meta.source) &&
+    stringValue(meta.id).toLowerCase() === sessionID
+  );
 }
 
 export function notifierFromEnvironment(environment = process.env) {
@@ -673,7 +730,7 @@ export async function main({
     payload,
     stringValue(environment.CODEX_CLAUDE_NOTIFY_FROM),
   );
-  if (envelope === null) {
+  if (envelope === null || !isAllowedStopPayload(payload, allowedSourcesFromEnvironment(environment))) {
     return;
   }
 
