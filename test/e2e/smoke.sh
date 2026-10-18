@@ -124,7 +124,7 @@ assert_capture() {
   if jq -e -s --arg token "$expected_token" '
     def expected_content:
       if type == "string" then
-        startswith("<cross-session-message from=\"codex\" from-name=\"codex\">\n[Codex turn complete] from=codex\n")
+        startswith("<cross-session-message from=\"codex\" from-name=\"codex\">\n[turn done] ")
         and endswith("\n</cross-session-message>")
         and (contains("<teammate-message") | not)
       else
@@ -164,7 +164,7 @@ assert_capture() {
           line_2_type: .[1].type,
           line_2_role_matches: (.[1].message.role? == "user"),
           line_2_content_type: ($content | type),
-          line_2_prefix_matches: ($content | string_check(startswith("<cross-session-message from=\"codex\" from-name=\"codex\">\n[Codex turn complete] from=codex\n"))),
+          line_2_prefix_matches: ($content | string_check(startswith("<cross-session-message from=\"codex\" from-name=\"codex\">\n[turn done] "))),
           line_2_suffix_matches: ($content | string_check(endswith("\n</cross-session-message>"))),
           line_2_has_no_wrapper_tag: ($content | string_check(contains("<teammate-message") | not))
         }

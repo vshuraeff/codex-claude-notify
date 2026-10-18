@@ -73,21 +73,22 @@ notify = ["codex-claude-notify", "--from", "reviewer"]
 
 ## Behavior
 
-The hook uses Claude Code's `cross-session-message` envelope so the notification renders as a native message from `@codex` (or the configured sender). Inside it are a completion header, the final assistant message, and a metadata line:
+The hook uses Claude Code's `cross-session-message` envelope so the notification renders as a native message from `@codex` (or the configured sender). Inside it are the `[turn done]` tag followed on the same line by the final assistant message, and a metadata line:
 
 ```xml
 <cross-session-message from="codex" from-name="codex">
-[Codex turn complete] from=codex
-full text of the final assistant message
+[turn done] first line of the final assistant message
+the rest of the message
 
-(codex thread 0199e0c1-..., cwd /path/to/project)
+(codex thread 0199e0c1-..., cwd /path/to/project, from=codex)
 </cross-session-message>
 ```
 
-- The completion header is the first line inside the envelope, even when the response body is dropped to fit the size limit.
-- `from=` is `codex`, or `codex:<name>` when a sender name is configured. The name is whitespace-collapsed and capped at 64 code points.
+- The tag shares the first line with the message because Claude Code's collapsed view shows only that line (`Message from @codex: [turn done] …`). The tag stays at the start of that line even when the response body is dropped to fit the size limit.
+- `buildEnvelope({ midTurn: true, … })` uses the `[msg]` tag instead, for messages sent while a Codex turn is still running.
+- `from=` in the metadata line is `codex`, or `codex:<name>` when a sender name is configured. The name is whitespace-collapsed and capped at 64 code points.
 - The envelope's `from` address stays `codex`. Its `from-name` display label removes quotes, angle brackets, and control/format characters and is capped at 64 code points including the `codex:` prefix, matching Claude's parser. XML entities are not decoded in this label.
-- The trailing metadata line reports the Codex thread id and working directory taken from the event; it is omitted when the event carries neither.
+- The trailing metadata line reports the Codex thread id and working directory taken from the event, when present, and always the sender.
 - The whole message, including its envelope, stays within 65536 bytes. A longer response is cut at a UTF-8 character boundary and marked with `[notification truncated]`; the metadata line and closing envelope are preserved.
 - If the metadata alone cannot fit alongside the header and envelope, delivery is skipped with a diagnostic on stderr.
 - A turn that ends without a final assistant message is reported as `The Codex turn finished without a final assistant message.`

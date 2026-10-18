@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-notify",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Delivers Codex turn completions as native peer notifications to the launching Claude Code session over its authenticated Unix socket.",
   "author": {
     "name": "Valentin Shuraeff"

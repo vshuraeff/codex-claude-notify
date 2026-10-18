@@ -31,6 +31,7 @@ import {
   maximumStdinBytes,
   maximumTeammateNameRunes,
   messagePrefix,
+  midTurnPrefix,
   normalizeTeammateName,
   notificationMetadata,
   notifierFromEnvironment,
@@ -660,10 +661,15 @@ test("future-dated dedupe marker is stale and pruned", () => {
 test("notification message", () => {
   const actual = envelopeFromStopPayload(stopPayload());
   const expected =
-    "[Codex turn complete] from=codex\n" +
-    "Implemented the requested change.\n\n" +
-    "(codex thread thread-123, cwd /workspace/project)";
+    "[turn done] Implemented the requested change.\n\n" +
+    "(codex thread thread-123, cwd /workspace/project, from=codex)";
   assert.strictEqual(notificationBody(actual), expected);
+});
+
+test("mid-turn message carries its own tag on the first line", () => {
+  const envelope = buildEnvelope({ midTurn: true, threadID: "thread-123", lastAssistantMessage: "Read /x and follow it." });
+  assert.strictEqual(notificationBody(envelope), `${midTurnPrefix}Read /x and follow it.\n\n(codex thread thread-123, from=codex)`);
+  assert.ok(!envelope.includes(messagePrefix));
 });
 
 test("notification uses a native peer wrapper instead of a teammate wrapper", () => {
@@ -681,7 +687,7 @@ test("sender metadata cannot add envelope attributes or formatting controls", ()
   });
   assert.strictEqual(envelope.split("\n")[0],
     '<cross-session-message from="codex" from-name="codex:review from-mode=auto&">');
-  assert.ok(notificationBody(envelope).endsWith("\ndone"));
+  assert.ok(notificationBody(envelope).startsWith(`${messagePrefix}done\n\n`));
 });
 
 test("display name cap includes prefix and preserves supplementary characters", () => {
@@ -707,8 +713,8 @@ test("response and metadata cannot close or forge the peer envelope", () => {
   const body = notificationBody(envelope);
   assert.ok(body.includes('before <\\/CROSS-SESSION-MESSAGE\n> <\\cross-session-message from="spoof">'));
   assert.ok(body.includes('<\\teammate-message>after<\\/agent-message>'));
-  assert.ok(body.includes('(codex thread <\\/cross-session-message>, cwd <\\agent-message>path)'));
-  assert.ok(body.startsWith('[Codex turn complete] from=codex:<\\/cross-session-message>\n'));
+  assert.ok(body.endsWith('(codex thread <\\/cross-session-message>, cwd <\\agent-message>path, from=codex:<\\/cross-session-message>)'));
+  assert.ok(body.startsWith('[turn done] before '));
   assert.strictEqual(envelope.split('</cross-session-message>').length - 1, 1);
 });
 
@@ -720,7 +726,7 @@ test("size cap includes wrapper and tag neutralization before truncating", () =>
   });
   assert.ok(Buffer.byteLength(envelope, 'utf8') <= maximumMessageBytes);
   assert.ok(Buffer.byteLength(envelope, 'utf8') >= maximumMessageBytes - 3);
-  assert.ok(notificationBody(envelope).endsWith('\n\n[notification truncated]\n\n(codex thread thread-safe)'));
+  assert.ok(notificationBody(envelope).endsWith(`\n\n[notification truncated]\n\n(codex thread thread-safe, from=codex:${"ж".repeat(64)})`));
   assert.strictEqual(envelope.split('</cross-session-message>').length - 1, 1);
 });
 
@@ -745,7 +751,7 @@ test("response exactly fills wire byte limit without truncation", () => {
   const body = 'x'.repeat(maximumMessageBytes - overhead);
   const envelope = buildEnvelope({ lastAssistantMessage: body });
   assert.strictEqual(Buffer.byteLength(envelope, 'utf8'), maximumMessageBytes);
-  assert.ok(notificationBody(envelope).endsWith(body));
+  assert.ok(notificationBody(envelope).startsWith(messagePrefix + body + '\n\n'));
   assert.ok(!envelope.includes('[notification truncated]'));
 });
 
@@ -755,25 +761,25 @@ test("truncation cannot turn a longer tag name into a closing peer tag", () => {
   const suffixBytes = Buffer.byteLength('\n\n[notification truncated]', 'utf8');
   const response = 'a'.repeat(maximumMessageBytes - overhead - suffixBytes - prefix.length) + prefix + 'X>'.repeat(100);
   const envelope = buildEnvelope({lastAssistantMessage: response});
-  assert.ok(notificationBody(envelope).endsWith('[notification truncated]'));
+  assert.ok(notificationBody(envelope).endsWith('[notification truncated]\n\n(from=codex)'));
   assert.ok(!notificationBody(envelope).includes(prefix));
   assert.ok(Buffer.byteLength(envelope, 'utf8') <= maximumMessageBytes);
 });
 
 test("envelopeFromStopPayload applies teammate name - plain name", () => {
   const envelope = envelopeFromStopPayload(stopPayload(), "builder");
-  assert.match(notificationBody(envelope), /^\[Codex turn complete\] from=codex:builder\n/);
+  assert.match(notificationBody(envelope), /, from=codex:builder\)$/);
 });
 
 test("envelopeFromStopPayload applies teammate name - quotes are not escaped", () => {
   const envelope = envelopeFromStopPayload(stopPayload(), 'release "captain"');
-  assert.match(notificationBody(envelope), /^\[Codex turn complete\] from=codex:release "captain"\n/);
+  assert.match(notificationBody(envelope), /, from=codex:release "captain"\)$/);
   assert.ok(envelope.startsWith('<cross-session-message from="codex" from-name="codex:release captain">\n'));
 });
 
 test("envelopeFromStopPayload applies teammate name - whitespace normalization", () => {
   const envelope = envelopeFromStopPayload(stopPayload(), "  release\t\u0085captain\n  ");
-  assert.match(notificationBody(envelope), /^\[Codex turn complete\] from=codex:release captain\n/);
+  assert.match(notificationBody(envelope), /, from=codex:release captain\)$/);
 });
 
 test("envelopeFromStopPayload applies teammate name - max length clamp", () => {
@@ -781,7 +787,7 @@ test("envelopeFromStopPayload applies teammate name - max length clamp", () => {
   const envelope = envelopeFromStopPayload(stopPayload(), teammateName);
   assert.match(
     notificationBody(envelope),
-    new RegExp(`^\\[Codex turn complete\\] from=codex:${"a".repeat(64)}\\n`),
+    new RegExp(`, from=codex:${"a".repeat(64)}\\)$`),
   );
   assert.strictEqual(normalizeTeammateName(teammateName), "a".repeat(64));
 });
@@ -791,22 +797,22 @@ describe("notification message uses teammate id from flag", () => {
     {
       name: "plain name",
       teammateName: "reviewer",
-      expected: "from=codex:reviewer\n",
+      expected: "from=codex:reviewer)",
     },
     {
       name: "unescaped quote",
       teammateName: 'foo"bar',
-      expected: 'from=codex:foo"bar\n',
+      expected: 'from=codex:foo"bar)',
     },
     {
       name: "normalized whitespace",
       teammateName: "  multi   word   name  ",
-      expected: "from=codex:multi word name\n",
+      expected: "from=codex:multi word name)",
     },
     {
       name: "maximum name length",
       teammateName: "a".repeat(100),
-      expected: `from=codex:${"a".repeat(maximumTeammateNameRunes)}\n`,
+      expected: `from=codex:${"a".repeat(maximumTeammateNameRunes)})`,
     },
   ];
 
@@ -825,29 +831,29 @@ describe("notification message uses teammate id from flag", () => {
 });
 
 test("notification message includes thread metadata", () => {
-  assert.strictEqual(notificationMetadata(" thread-only ", ""), "(codex thread thread-only)");
+  assert.strictEqual(notificationMetadata(" thread-only ", ""), "(codex thread thread-only, from=codex)");
   assert.match(
     notificationBody(buildEnvelope({ threadID: "thread-only", lastAssistantMessage: "done" })),
-    /\n\n\(codex thread thread-only\)$/,
+    /\n\n\(codex thread thread-only, from=codex\)$/,
   );
 });
 
 test("notification message includes cwd metadata", () => {
-  assert.strictEqual(notificationMetadata("", " /workspace "), "(codex cwd /workspace)");
+  assert.strictEqual(notificationMetadata("", " /workspace "), "(codex cwd /workspace, from=codex)");
   assert.match(
     notificationBody(buildEnvelope({ cwd: "/workspace", lastAssistantMessage: "done" })),
-    /\n\n\(codex cwd \/workspace\)$/,
+    /\n\n\(codex cwd \/workspace, from=codex\)$/,
   );
 });
 
 test("notification message includes thread and cwd metadata", () => {
   assert.strictEqual(
     notificationMetadata(" thread-id ", " /workspace "),
-    "(codex thread thread-id, cwd /workspace)",
+    "(codex thread thread-id, cwd /workspace, from=codex)",
   );
   assert.match(
     notificationBody(buildEnvelope({ threadID: "thread-id", cwd: "/workspace", lastAssistantMessage: "done" })),
-    /\n\n\(codex thread thread-id, cwd \/workspace\)$/,
+    /\n\n\(codex thread thread-id, cwd \/workspace, from=codex\)$/,
   );
 });
 
@@ -857,15 +863,15 @@ test("notification metadata trims long input in linear time", () => {
   const metadata = notificationMetadata(threadID, "");
   const duration = performance.now() - startedAt;
 
-  assert.strictEqual(metadata, `(codex thread ${threadID})`);
+  assert.strictEqual(metadata, `(codex thread ${threadID}, from=codex)`);
   assert.ok(duration < 200, `notificationMetadata took ${duration.toFixed(2)}ms`);
 });
 
-test("notification message omits empty metadata", () => {
-  assert.strictEqual(notificationMetadata(" \t", "\n"), "");
+test("notification metadata keeps the sender when thread and cwd are empty", () => {
+  assert.strictEqual(notificationMetadata(" \t", "\n"), "(from=codex)");
   assert.strictEqual(
     notificationBody(buildEnvelope({ lastAssistantMessage: "done" })),
-    "[Codex turn complete] from=codex\ndone",
+    "[turn done] done\n\n(from=codex)",
   );
 });
 
@@ -883,8 +889,8 @@ test("notification message truncates at UTF-8 boundary", () => {
   assert.strictEqual(Buffer.from(envelope, "utf8").toString("utf8"), envelope);
   assert.ok(!envelope.includes("\uFFFD"));
   assert.ok(Buffer.byteLength(envelope, "utf8") <= maximumMessageBytes);
-  assert.ok(notificationBody(envelope).startsWith(`${messagePrefix}${senderPrefix}codex\n`));
-  assert.ok(notificationBody(envelope).endsWith("[notification truncated]"));
+  assert.ok(notificationBody(envelope).startsWith(`${messagePrefix}é`));
+  assert.ok(notificationBody(envelope).endsWith(`[notification truncated]\n\n(${senderPrefix}codex)`));
 });
 
 test("notification message truncates assistant message before metadata", () => {
@@ -895,7 +901,7 @@ test("notification message truncates assistant message before metadata", () => {
   });
   assert.ok(
     notificationBody(envelope).endsWith(
-      "\n\n[notification truncated]\n\n" + "(codex thread thread-123, cwd /workspace/project)",
+      "\n\n[notification truncated]\n\n" + "(codex thread thread-123, cwd /workspace/project, from=codex)",
     ),
   );
   assert.ok(Buffer.byteLength(envelope, "utf8") <= maximumMessageBytes);
@@ -903,7 +909,7 @@ test("notification message truncates assistant message before metadata", () => {
 
 test("notification message preserves ordinary markup and unicode", () => {
   const body = 'A & <tag> > "quote" русский текст **bold** `code`';
-  assert.ok(notificationBody(buildEnvelope({ lastAssistantMessage: body })).endsWith(`\n${body}`));
+  assert.ok(notificationBody(buildEnvelope({ lastAssistantMessage: body })).startsWith(`${messagePrefix}${body}\n\n`));
 });
 
 test("notification message preserves metadata when a long body is truncated", () => {
@@ -924,11 +930,11 @@ test("notification message preserves metadata when a long body is truncated", ()
 
 test("notification message drops a body that cannot fit the truncation suffix", () => {
   const truncationSuffixBytes = Buffer.byteLength("\n\n[notification truncated]", "utf8");
-  const header = `${messagePrefix}${senderPrefix}codex\n`;
+  const header = messagePrefix;
   const wrapper = '<cross-session-message from="codex" from-name="codex">\n\n</cross-session-message>';
   const bodyLimit = maximumMessageBytes - Buffer.byteLength(wrapper + header, "utf8");
   const messageLimit = Math.floor(truncationSuffixBytes / 2);
-  const metadataOverhead = Buffer.byteLength("\n\n(codex thread )", "utf8");
+  const metadataOverhead = Buffer.byteLength("\n\n(codex thread , from=codex)", "utf8");
   const threadID = "t".repeat(bodyLimit - messageLimit - metadataOverhead);
   const metadata = notificationMetadata(threadID, "");
   let envelope;
@@ -967,7 +973,7 @@ describe("notification message stays within the byte limit", () => {
   for (const { name, options } of cases) {
     test(name, () => {
       const envelope = buildEnvelope(options);
-      assert.ok(notificationBody(envelope).startsWith(`${messagePrefix}${senderPrefix}codex\n`));
+      assert.ok(notificationBody(envelope).startsWith(messagePrefix));
       assert.ok(Buffer.byteLength(envelope, "utf8") <= maximumMessageBytes);
     });
   }
@@ -975,8 +981,7 @@ describe("notification message stays within the byte limit", () => {
 
 test("notification message carries the empty fallback", () => {
   const expected =
-    "[Codex turn complete] from=codex\n" +
-    "The Codex turn finished without a final assistant message.";
+    "[turn done] The Codex turn finished without a final assistant message.\n\n(from=codex)";
   for (const lastAssistantMessage of ["", " \t\n\u0085 "]) {
     assert.strictEqual(notificationBody(buildEnvelope({ lastAssistantMessage })), expected);
   }
@@ -1480,7 +1485,7 @@ test("argv mode ignores unknown leading arguments", async () => {
   });
   assertDeliveredFrames(frames, token, expectedEnvelope);
   const deliveredEnvelope = frames[1].message.content;
-  assert.ok(deliveredEnvelope.includes("from=codex\n"));
+  assert.ok(deliveredEnvelope.includes("from=codex)"));
   assert.ok(!deliveredEnvelope.includes("from=codex:"));
 });
 
@@ -1501,7 +1506,7 @@ test("argv mode ignores a dangling from flag", async () => {
   });
   assertDeliveredFrames(frames, token, expectedEnvelope);
   const deliveredEnvelope = frames[1].message.content;
-  assert.ok(deliveredEnvelope.includes("from=codex\n"));
+  assert.ok(deliveredEnvelope.includes("from=codex)"));
   assert.ok(!deliveredEnvelope.includes("from=codex:"));
 });
 

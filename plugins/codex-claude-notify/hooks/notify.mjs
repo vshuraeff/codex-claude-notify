@@ -21,7 +21,9 @@ import process from "node:process";
 import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath } from "node:url";
 
-export const messagePrefix = "[Codex turn complete] ";
+// claude's collapsed view shows only the first body line, so the tag shares it with the message.
+export const messagePrefix = "[turn done] ";
+export const midTurnPrefix = "[msg] ";
 export const senderPrefix = "from=";
 export const maximumTeammateNameRunes = 64;
 export const maximumMessageBytes = 64 * 1024;
@@ -253,20 +255,21 @@ function neutralizeEnvelopeTags(value) {
   );
 }
 
-export function notificationMetadata(threadID, cwd) {
+export function notificationMetadata(threadID, cwd, sender = "codex") {
   const normalizedThreadID = trimUnicodeWhitespace(stringValue(threadID));
   const normalizedCWD = trimUnicodeWhitespace(stringValue(cwd));
+  const from = `${senderPrefix}${sender}`;
 
   if (normalizedThreadID !== "" && normalizedCWD !== "") {
-    return `(codex thread ${normalizedThreadID}, cwd ${normalizedCWD})`;
+    return `(codex thread ${normalizedThreadID}, cwd ${normalizedCWD}, ${from})`;
   }
   if (normalizedThreadID !== "") {
-    return `(codex thread ${normalizedThreadID})`;
+    return `(codex thread ${normalizedThreadID}, ${from})`;
   }
   if (normalizedCWD !== "") {
-    return `(codex cwd ${normalizedCWD})`;
+    return `(codex cwd ${normalizedCWD}, ${from})`;
   }
-  return "";
+  return `(${from})`;
 }
 
 export function truncateUTF8(message, limit) {
@@ -290,6 +293,7 @@ export function buildEnvelope({
   cwd = "",
   lastAssistantMessage = "",
   teammateName = "",
+  midTurn = false,
 } = {}) {
   const normalizedTeammateName = normalizeTeammateName(teammateName);
   const sender = normalizedTeammateName === "" ? "codex" : `codex:${normalizedTeammateName}`;
@@ -299,7 +303,7 @@ export function buildEnvelope({
     maximumTeammateNameRunes,
   ).trimEnd();
   const openTag = `<cross-session-message from="codex" from-name="${displayName}">\n`;
-  const header = neutralizeEnvelopeTags(`${messagePrefix}${senderPrefix}${sender}\n`);
+  const header = midTurn ? midTurnPrefix : messagePrefix;
 
   let lastMessage = neutralizeEnvelopeTags(trimUnicodeWhitespace(stringValue(lastAssistantMessage)));
   if (lastMessage === "") {
@@ -307,8 +311,7 @@ export function buildEnvelope({
   }
 
   const bodyLimit = maximumMessageBytes - Buffer.byteLength(openTag + header + crossSessionCloseTag, "utf8");
-  const metadata = neutralizeEnvelopeTags(notificationMetadata(threadID, cwd));
-  const metadataParagraph = metadata === "" ? "" : `\n\n${metadata}`;
+  const metadataParagraph = `\n\n${neutralizeEnvelopeTags(notificationMetadata(threadID, cwd, sender))}`;
   const messageLimit = Math.max(0, bodyLimit - Buffer.byteLength(metadataParagraph, "utf8"));
 
   let message = "";

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0 — 2026-10-18
+
+- Change the notification body so Claude Code's collapsed view shows the message. Its first line is now `[turn done] <first line of the final message>` instead of the bare header `[Codex turn complete] from=codex`. The sender moves into the metadata line, which becomes `(codex thread …, cwd …, from=codex)` and is always present. Consumers that matched the old header must match the new tag.
+- Add `buildEnvelope({ midTurn: true })`, which tags the body `[msg]` for a message sent while a Codex turn is still running.
+
 ## 0.1.3 — 2026-10-18
 
 - Resolve Claude Code messaging credentials per thread: for a UUID thread id, both the `Stop` hook and the legacy `notify` command first read `<Codex home>/claude-channels/<thread>`, which names a private JSON file holding the socket and token. A Codex session started outside Claude Code can then deliver once Claude registers the channel, and keeps delivering after Claude restarts without restarting Codex. An absent registry, or a relative Codex home, keeps the previous environment behavior.
