@@ -17,7 +17,7 @@ import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { describe, test } from "bun:test";
+import { afterAll, describe, test } from "bun:test";
 
 import {
   buildEnvelope,
@@ -94,8 +94,12 @@ function notifyPayload(overrides = {}) {
   };
 }
 
+// an empty codex home keeps hook subprocesses away from the developer's real thread channels.
+const emptyCodexHome = mkdtempSync(`${tmpdir()}/ccn-empty-home-`);
+afterAll(() => rmSync(emptyCodexHome, { recursive: true, force: true }));
+
 function isolatedEnvironment(overrides = {}) {
-  const environment = { ...process.env, ...overrides };
+  const environment = { ...process.env, CODEX_HOME: emptyCodexHome, ...overrides };
   for (const name of [
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",

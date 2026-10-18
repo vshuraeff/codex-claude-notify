@@ -64,6 +64,11 @@ test("non-UUID legacy ids never form registry filenames", () => withFixture((f) 
   assert.equal(notifierForThread("../env.json", f.environment).token, "fixture-legacy-token");
 }));
 
+test("a relative Codex home keeps environment delivery", () => withFixture((f) => {
+  assert.equal(notifierForThread(thread, { ...f.environment, CODEX_HOME: "relative-home" }).token, "fixture-legacy-token");
+  assert.equal(notifierForThread(thread, { ...f.environment, CODEX_HOME: "", HOME: "relative-home" }).token, "fixture-legacy-token");
+}));
+
 const invalidCases = {
   "directory permissions": (f) => chmodSync(f.directory, 0o755),
   "directory symlink": (f) => { rmSync(f.directory, { recursive: true }); symlinkSync(f.root, f.directory); },
@@ -91,10 +96,48 @@ const invalidCases = {
   "JSON wrong type": (f) => writeFileSync(f.json, JSON.stringify({ ...f.credentials, CLAUDE_CODE_MESSAGING_TOKEN: 1 })),
   "JSON relative socket": (f) => writeFileSync(f.json, JSON.stringify({ ...f.credentials, CLAUDE_CODE_MESSAGING_SOCKET: "relative" })),
 };
+// each case must fail on its own check, so removing that check cannot pass on an unrelated error.
+const unsafeOpen = /cannot be opened safely/;
+const unsafeMode = /ownership or permissions are unsafe/;
+const wrongType = /invalid file type/;
+const oversized = /exceeds size limit/;
+const badEntry = /must name an absolute JSON path/;
+const badShape = /exactly two nonempty strings/;
+const expectedDiagnostics = {
+  "directory permissions": unsafeMode,
+  "directory symlink": unsafeOpen,
+  "directory file": unsafeOpen,
+  "entry permissions": unsafeMode,
+  "entry symlink": unsafeOpen,
+  "dangling entry symlink": unsafeOpen,
+  "entry directory": wrongType,
+  "entry fifo": wrongType,
+  "entry oversized": oversized,
+  "entry relative path": badEntry,
+  "entry extra newline": badEntry,
+  "entry NUL": badEntry,
+  "missing JSON": unsafeOpen,
+  "JSON symlink": unsafeOpen,
+  "JSON permissions": unsafeMode,
+  "JSON directory": wrongType,
+  "JSON fifo": wrongType,
+  "JSON oversized": oversized,
+  "JSON malformed": /not valid JSON/,
+  "JSON array": badShape,
+  "JSON null": badShape,
+  "JSON extra key": badShape,
+  "JSON empty token": badShape,
+  "JSON wrong type": badShape,
+  "JSON relative socket": /socket path must be absolute/,
+};
+test("every refusal case names its expected diagnostic", () => {
+  assert.deepEqual(Object.keys(expectedDiagnostics).sort(), Object.keys(invalidCases).sort());
+});
 for (const [name, mutate] of Object.entries(invalidCases)) {
   test(`present channel refuses fallback: ${name}`, () => withFixture((f) => {
     mutate(f);
     assert.throws(() => notifierForThread(thread, f.environment), (error) => {
+      assert.match(error.message, expectedDiagnostics[name]);
       assert.ok(!error.message.includes("fixture-malformed-json"));
       assert.ok(!error.message.includes(f.root));
       return true;

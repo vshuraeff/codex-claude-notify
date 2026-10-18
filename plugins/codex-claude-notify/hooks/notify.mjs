@@ -497,7 +497,8 @@ export function notifierForThread(threadID, environment = process.env) {
   }
   const home = stringValue(environment.CODEX_HOME) ||
     join(stringValue(environment.HOME) || homedir(), ".codex");
-  if (!isAbsolute(home)) throw new Error("channel home must be absolute");
+  // a relative home names no registry, so it keeps the legacy environment path.
+  if (!isAbsolute(home)) return notifierFromEnvironment(environment);
   const directory = join(home, "claude-channels");
   const directoryFD = openPrivateChannelPath(directory, true, true);
   if (directoryFD === null) return notifierFromEnvironment(environment);
