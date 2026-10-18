@@ -95,7 +95,7 @@ full text of the final assistant message
 
 Verified on Claude Code 2.1.278 and Codex CLI 0.155.1 on 2026-09-21. Claude 2.1.277 began neutralizing incoming `teammate-message` wrappers; the canonical outer `cross-session-message` remains native. This is an internal, version-sensitive wire format. It identifies a peer notification and does not register Codex as a Claude-managed subagent or teammate.
 
-When neither `CLAUDE_CODE_MESSAGING_SOCKET` nor `CLAUDE_CODE_MESSAGING_TOKEN` is present, the hook sends nothing and prints nothing. A global Codex configuration is therefore safe for Codex sessions started from a plain shell, an editor, or CI. Delivery failures are reported on stderr only; the hook always exits 0, so it never fails a Codex turn.
+When there is no registered thread channel and neither `CLAUDE_CODE_MESSAGING_SOCKET` nor `CLAUDE_CODE_MESSAGING_TOKEN` is present, the hook sends nothing and prints nothing. Delivery failures are reported on stderr only; the hook always exits 0, so it never fails a Codex turn.
 
 Three environment variables control it:
 
@@ -104,6 +104,18 @@ Three environment variables control it:
 - `CODEX_CLAUDE_NOTIFY_SOURCES`, a comma-separated list of rollout sources, limits `Stop` delivery to sessions whose rollout file (the payload's `transcript_path`) starts with a `session_meta` record naming the same session id and one of those sources: `cli` for the interactive TUI, `exec` for `codex exec`. Unset or empty, every `Stop` delivers. Set `CODEX_CLAUDE_NOTIFY_SOURCES=cli` when launching an interactive Codex session whose completions should reach Claude: the `codex exec` runs it starts (a review tool's reviewer seats, for one) inherit the variable and stay silent. A missing, unreadable or non-regular rollout file, a first line over 1 MiB, or a resumed thread first created under another source suppresses delivery. The legacy argv mode carries no rollout path and is not filtered.
 
 For example, launch `CODEX_CLAUDE_NOTIFY_FROM=reviewer codex exec 'review the change'` from Claude to label the notification `codex:reviewer` when using the `Stop` hook.
+
+## Thread channels
+
+A running Codex session can receive Claude's messaging credentials after launch, or refresh them after Claude restarts, through a per-thread file. Both Stop and legacy notify use this lookup before the inherited environment.
+
+For a UUID thread id, the hook reads `<Codex home>/claude-channels/<lowercase thread UUID>`. Codex home is nonempty `CODEX_HOME`, otherwise `$HOME/.codex`. The entry contains an absolute path to a JSON credentials file, optionally followed by one newline. That JSON object contains exactly `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`, both nonempty strings. The socket must be absolute (an optional `uds:` prefix is accepted).
+
+The process registering the channel must create the channel directory at mode 700 and both files at mode 600, owned by the current user. Publish replacements by rename. Keep the JSON in Claude's private session scratch directory; the registry contains its path, never credential values. Register in the effective Codex home of the receiving process, which can differ from the registering process's home. Delete the entry when that channel is retired; update it when Claude's credentials move.
+
+The hook opens the directory and files without following their final symlink, checks type, owner and private permissions through file descriptors, and uses nonblocking bounded reads (4 KiB entry, 16 KiB JSON). An absent directory or entry uses the legacy environment credentials. A present but unsafe, unreadable, malformed or stale channel skips delivery with a fixed diagnostic, without environment fallback. A failed registered socket connection also does not retry with inherited credentials. Non-UUID legacy event ids never form registry filenames and retain environment delivery.
+
+The disable switch, Stop-only event gate, source filter and existing deduplication still apply. A registry alone does not isolate unregistered child sessions: they can still inherit environment credentials. Keep the source filter when launching a peer whose exec children must stay silent. Registration and a successful socket write do not prove Claude received or processed a notification; verify the live two-way exchange separately.
 
 ## Requirements
 
@@ -126,18 +138,18 @@ Without it, Claude Code asks before accepting the first message from another ses
 
 ## Security
 
-The session token is read only from the environment of the running process. It is not logged, printed, or written to disk, and the only place it goes is the auth frame on the session's own socket. No network connection is made.
+The hook reads the session token from a registered private JSON file or the running process's environment. It does not log, print or write the token; it sends it in the socket's auth frame. A channel registrar writes the private credential file separately. No network connection is made.
 
 Claude Code treats the delivered text as a message from another session, which is data and not consent. Such a message cannot approve a permission prompt, change configuration, or execute commands or slash commands.
 
-The hook sends the token to whatever Unix socket the `CLAUDE_CODE_MESSAGING_SOCKET` environment variable points at by absolute path. The trust boundary is the integrity of the process environment and of the socket's filesystem location: whoever controls that environment controls where the delivery goes.
+The hook sends the token to the absolute Unix socket selected by the registered credentials or environment. The trust boundary includes the integrity of the process environment, channel directory and credential file, and the socket's filesystem location. Same-user processes that can replace those private files can redirect delivery.
 
 ## Troubleshooting
 
 If a message never arrives, check in order:
 
 - Is the hook trusted? An untrusted `Stop` hook is skipped silently on headless runs. Start interactive `codex` and run `/hooks` to trust it.
-- Are both `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` present in the Codex process's environment? Outside Claude Code the hook stays silent by design; with only one of the two set, it prints the reason to stderr.
+- Is the thread channel registered in this Codex process's effective home, or are both `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` present in its environment? With neither source the hook stays silent; an incomplete environment or invalid registered channel prints a diagnostic. Do not print credentials while diagnosing it.
 - Are the feature-flag variables clear: `env | grep -E 'DISABLE_TELEMETRY|DO_NOT_TRACK|DISABLE_GROWTHBOOK|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'` should print nothing.
 - Delivery errors go to the Codex process's stderr, and the hook always exits 0, so a failed delivery never fails the Codex turn.
 - For automation or CI where the interactive trust step is unavailable, `codex exec --dangerously-bypass-hook-trust` skips it; use this only against an isolated, disposable `CODEX_HOME`, never a real one.

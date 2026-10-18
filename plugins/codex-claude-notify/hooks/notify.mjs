@@ -15,8 +15,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import process from "node:process";
 import { clearTimeout, setTimeout } from "node:timers";
 import { fileURLToPath } from "node:url";
@@ -446,6 +446,88 @@ export function notifierFromEnvironment(environment = process.env) {
   return { socketPath, token, timeout: defaultSocketTimeout };
 }
 
+function openPrivateChannelPath(path, directory, allowMissing) {
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW |
+      fsConstants.O_NONBLOCK | (directory ? fsConstants.O_DIRECTORY : 0));
+  } catch (error) {
+    if (allowMissing && error.code === "ENOENT") return null;
+    throw new Error("channel path cannot be opened safely");
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (directory ? !stat.isDirectory() : !stat.isFile()) {
+      throw new Error("channel path has an invalid file type");
+    }
+    if (stat.uid !== process.getuid() || (stat.mode & 0o077) !== 0) {
+      throw new Error("channel path ownership or permissions are unsafe");
+    }
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+function readPrivateChannelFile(path, maximumBytes, allowMissing = false) {
+  const fd = openPrivateChannelPath(path, false, allowMissing);
+  if (fd === null) return null;
+  try {
+    const buffer = Buffer.alloc(maximumBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(fd, buffer, length, buffer.length - length, null);
+      if (count === 0) return buffer.toString("utf8", 0, length);
+      length += count;
+    }
+    throw new Error("channel file exceeds size limit");
+  } catch (error) {
+    if (error.message === "channel file exceeds size limit") throw error;
+    throw new Error("channel file cannot be read");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export function notifierForThread(threadID, environment = process.env) {
+  // legacy notify callers can use non-uuid ids; they never form channel paths.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(stringValue(threadID))) {
+    return notifierFromEnvironment(environment);
+  }
+  const home = stringValue(environment.CODEX_HOME) ||
+    join(stringValue(environment.HOME) || homedir(), ".codex");
+  if (!isAbsolute(home)) throw new Error("channel home must be absolute");
+  const directory = join(home, "claude-channels");
+  const directoryFD = openPrivateChannelPath(directory, true, true);
+  if (directoryFD === null) return notifierFromEnvironment(environment);
+  let entry;
+  try {
+    entry = readPrivateChannelFile(join(directory, threadID.toLowerCase()), 4096, true);
+  } finally {
+    closeSync(directoryFD);
+  }
+  if (entry === null) return notifierFromEnvironment(environment);
+  const path = entry.endsWith("\n") ? entry.slice(0, -1) : entry;
+  if (!isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path)) {
+    throw new Error("channel entry must name an absolute JSON path");
+  }
+  const content = readPrivateChannelFile(path, 16384);
+  let credentials;
+  try {
+    credentials = JSON.parse(content);
+  } catch {
+    throw new Error("channel credentials are not valid JSON");
+  }
+  const keys = ["CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN"];
+  if (credentials === null || typeof credentials !== "object" || Array.isArray(credentials) ||
+    Object.keys(credentials).length !== keys.length ||
+    keys.some((key) => typeof credentials[key] !== "string" || credentials[key] === "")) {
+    throw new Error("channel credentials must contain exactly two nonempty strings");
+  }
+  return notifierFromEnvironment(credentials);
+}
+
 export async function sendMessage(message, notifier, { connect = createConnection } = {}) {
   if (message === "") {
     throw new Error("message must not be empty");
@@ -643,16 +725,15 @@ export async function mainFromNotifyArguments(
     return;
   }
 
+  const threadID = threadIDFromNotifyArguments(cliArgs);
   let notifier;
   try {
-    notifier = notifierFromEnvironment(environment);
+    notifier = notifierForThread(threadID, environment);
   } catch (error) {
     writeDiagnostic(stderr, error);
     return;
   }
-  if (notifier === null) {
-    return;
-  }
+  if (notifier === null) return;
 
   let envelope;
   try {
@@ -665,7 +746,6 @@ export async function mainFromNotifyArguments(
     return;
   }
 
-  const threadID = threadIDFromNotifyArguments(cliArgs);
   if (!claimDedupeMarker(threadID, environment, "from")) {
     removeDedupeMarker(threadID, environment);
     return;
@@ -708,21 +788,16 @@ export async function main({
     return;
   }
 
-  let notifier;
-  try {
-    notifier = notifierFromEnvironment(environment);
-  } catch (error) {
-    writeDiagnostic(stderr, error);
-    return;
-  }
-  if (notifier === null) {
-    return;
-  }
-
   let payload;
   try {
     payload = JSON.parse(stdinResult.input);
   } catch {
+    // malformed payloads have no thread; retain legacy environment diagnostics.
+    try {
+      notifierFromEnvironment(environment);
+    } catch (error) {
+      writeDiagnostic(stderr, error);
+    }
     return;
   }
 
@@ -733,6 +808,15 @@ export async function main({
   if (envelope === null || !isAllowedStopPayload(payload, allowedSourcesFromEnvironment(environment))) {
     return;
   }
+
+  let notifier;
+  try {
+    notifier = notifierForThread(payload.session_id, environment);
+  } catch (error) {
+    writeDiagnostic(stderr, error);
+    return;
+  }
+  if (notifier === null) return;
 
   if (!claimDedupeMarker(payload.session_id, environment, "stop")) {
     removeDedupeMarker(payload.session_id, environment);
