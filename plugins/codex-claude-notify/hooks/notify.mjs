@@ -333,6 +333,20 @@ export function buildEnvelope({
   return notification;
 }
 
+// a registered peer channel carries only the two-peers protocol lines, never conversation.
+const protocolPointerPatterns = [
+  // a path may hold spaces but never the terminator, so a sentence cannot pass as one pointer.
+  /^Read \/(?:(?! and follow it\.).)+ and follow it\.$/,
+  /^Board changed: \/[^#]+ #[0-9]+$/,
+  /^seen #[0-9]+$/,
+];
+
+export function isProtocolPointer(message) {
+  const firstLine = trimUnicodeWhitespace(stringValue(message)).split("\n")[0].trim();
+  const line = /^`[^`]+`$/.test(firstLine) ? firstLine.slice(1, -1) : firstLine;
+  return protocolPointerPatterns.some((pattern) => pattern.test(line));
+}
+
 export function envelopeFromStopPayload(payload, teammateName = "") {
   if (payload === null || typeof payload !== "object" || payload.hook_event_name !== "Stop") {
     return null;
@@ -529,7 +543,7 @@ export function notifierForThread(threadID, environment = process.env) {
     keys.some((key) => typeof credentials[key] !== "string" || credentials[key] === "")) {
     throw new Error("channel credentials must contain exactly two nonempty strings");
   }
-  return notifierFromEnvironment(credentials);
+  return { ...notifierFromEnvironment(credentials), channel: true };
 }
 
 export async function sendMessage(message, notifier, { connect = createConnection } = {}) {
@@ -749,6 +763,9 @@ export async function mainFromNotifyArguments(
   if (envelope === null) {
     return;
   }
+  if (notifier.channel && !isProtocolPointer(JSON.parse(cliArgs.at(-1))["last-assistant-message"])) {
+    return;
+  }
 
   if (!claimDedupeMarker(threadID, environment, "from")) {
     removeDedupeMarker(threadID, environment);
@@ -821,6 +838,7 @@ export async function main({
     return;
   }
   if (notifier === null) return;
+  if (notifier.channel && !isProtocolPointer(payload.last_assistant_message)) return;
 
   if (!claimDedupeMarker(payload.session_id, environment, "stop")) {
     removeDedupeMarker(payload.session_id, environment);

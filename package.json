@@ -1,6 +1,6 @@
 {
   "name": "codex-claude-notify",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Delivers Codex turn completions as native peer notifications to the launching Claude Code session over its authenticated Unix socket.",
   "bin": {
     "codex-claude-notify": "./plugins/codex-claude-notify/hooks/notify.mjs"

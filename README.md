@@ -116,6 +116,14 @@ The process registering the channel must create the channel directory at mode 70
 
 The hook opens the directory and files without following their final symlink, checks type, owner and private permissions through file descriptors, and uses nonblocking bounded reads (4 KiB entry, 16 KiB JSON). An absent directory or entry, or a relative Codex home, uses the legacy environment credentials. A present but unsafe, unreadable, malformed or stale channel skips delivery with a fixed diagnostic, without environment fallback. A failed registered socket connection also does not retry with inherited credentials. Non-UUID legacy event ids never form registry filenames and retain environment delivery.
 
+A registered channel belongs to a peer pair, so it forwards only protocol lines, not conversation. It delivers a turn end only when the first line of the final message, after trimming and optional surrounding backticks, is exactly one of these:
+
+- `Read <absolute path> and follow it.`
+- `Board changed: <absolute path> #<n>`
+- `seen #<n>`
+
+Any other turn end, for example a turn where the user talked to Codex directly, sends nothing and prints nothing. Delivery through inherited environment credentials is not filtered.
+
 The disable switch, Stop-only event gate, source filter and existing deduplication still apply. A registry alone does not isolate unregistered child sessions: they can still inherit environment credentials. Keep the source filter when launching a peer whose exec children must stay silent. Registration and a successful socket write do not prove Claude received or processed a notification; verify the live two-way exchange separately.
 
 ## Requirements
@@ -150,7 +158,7 @@ The hook sends the token to the absolute Unix socket selected by the registered 
 If a message never arrives, check in order:
 
 - Is the hook trusted? An untrusted `Stop` hook is skipped silently on headless runs. Start interactive `codex` and run `/hooks` to trust it.
-- Is the thread channel registered in this Codex process's effective home, or are both `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` present in its environment? With neither source the hook stays silent; an incomplete environment or invalid registered channel prints a diagnostic. Do not print credentials while diagnosing it.
+- Is the thread channel registered in this Codex process's effective home, or are both `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` present in its environment? With neither source the hook stays silent; an incomplete environment or invalid registered channel prints a diagnostic. A registered channel also stays silent when the final message does not open with a protocol line (see Thread channels). Do not print credentials while diagnosing it.
 - Are the feature-flag variables clear: `env | grep -E 'DISABLE_TELEMETRY|DO_NOT_TRACK|DISABLE_GROWTHBOOK|CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'` should print nothing.
 - Delivery errors go to the Codex process's stderr, and the hook always exits 0, so a failed delivery never fails the Codex turn.
 - For automation or CI where the interactive trust step is unavailable, `codex exec --dangerously-bypass-hook-trust` skips it; use this only against an isolated, disposable `CODEX_HOME`, never a real one.

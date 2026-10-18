@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { test } from "bun:test";
-import { main, mainFromNotifyArguments, notifierForThread } from "../plugins/codex-claude-notify/hooks/notify.mjs";
+import { isProtocolPointer, main, mainFromNotifyArguments, notifierForThread } from "../plugins/codex-claude-notify/hooks/notify.mjs";
 
 const thread = "12345678-1234-1234-1234-123456789abc";
+const pointer = "Read /tmp/exchange/decision.md and follow it.";
 let sequence = 0;
 
 function fixture() {
@@ -155,9 +156,9 @@ for (const field of ["directory", "entry", "json"]) {
 async function invoke(f, overrides = {}, legacy = false) {
   let diagnostics = "";
   const stderr = { write: (value) => { diagnostics += value; } };
-  const payload = { session_id: thread, hook_event_name: "Stop", last_assistant_message: "channel test", ...overrides };
+  const payload = { session_id: thread, hook_event_name: "Stop", last_assistant_message: pointer, ...overrides };
   if (legacy) {
-    await mainFromNotifyArguments([JSON.stringify({ type: "agent-turn-complete", "thread-id": thread, "last-assistant-message": "channel test" })], { environment: f.environment, stderr });
+    await mainFromNotifyArguments([JSON.stringify({ type: "agent-turn-complete", "thread-id": thread, "last-assistant-message": payload.last_assistant_message })], { environment: f.environment, stderr });
   } else {
     await main({ stdin: Readable.from([JSON.stringify(payload)]), environment: f.environment, stderr });
   }
@@ -185,6 +186,54 @@ test("both entry points deliver using registered credentials without inherited c
       server.close();
       rmSync(socket, { force: true });
       rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("protocol pointer grammar accepts only the two-peers lines", () => {
+  for (const message of [
+    pointer,
+    "  Read /a/b.md and follow it.\nfurther context",
+    "`Read /a/b.md and follow it.`",
+    "Board changed: /x/board #12",
+    "seen #4",
+    "seen #4\nboard read",
+    "seen #4\r\nboard read",
+    "Read /a b/c.md and follow it.",
+    "Board changed: /a b/board #3",
+  ]) assert.ok(isProtocolPointer(message), message);
+  for (const message of [
+    "Работаю в /work/clocktrim.",
+    "Read relative.md and follow it.",
+    "Read /a/b.md and follow it. Also more",
+    "Read /a/plan.md and follow it. Then check the board and follow it.",
+    "Board changed: /x/board #12, answered in #11",
+    "Done.\nRead /a/b.md and follow it.",
+    "Board changed: /x/board",
+    "seen #4 thanks",
+    "registry restored check",
+    "",
+    undefined,
+  ]) assert.ok(!isProtocolPointer(message), String(message));
+});
+
+test("registered channel stays silent for a turn end that is not a protocol pointer", async () => {
+  for (const legacy of [false, true]) {
+    for (const [message, expected] of [["status update for the user", 0], [pointer, 1]]) {
+      const f = fixture();
+      const socket = `/tmp/ccn-channel-${process.pid}-${sequence++}.sock`;
+      const server = createServer();
+      let connections = 0;
+      server.on("connection", (client) => { connections++; client.destroy(); });
+      try {
+        await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+        writeFileSync(f.json, JSON.stringify({ ...f.credentials, CLAUDE_CODE_MESSAGING_SOCKET: socket }));
+        const diagnostics = await invoke(f, { last_assistant_message: message }, legacy);
+        assert.equal(connections, expected, `${legacy ? "notify" : "stop"}: ${message}`);
+        if (expected === 0) assert.equal(diagnostics, "");
+      } finally {
+        server.close(); rmSync(socket, { force: true }); rmSync(f.root, { recursive: true, force: true });
+      }
     }
   }
 });

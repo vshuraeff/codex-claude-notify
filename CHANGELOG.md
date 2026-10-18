@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 — 2026-10-18
+
+- A registered thread channel now delivers a turn end only when the first line of the final message is a two-peers protocol line: `Read <absolute path> and follow it.`, `Board changed: <absolute path> #<n>`, or `seen #<n>`. Optional surrounding backticks are allowed. Other turn ends of a peer thread, such as a conversation with the user, are no longer forwarded. Delivery through inherited environment credentials is unchanged. `isProtocolPointer` is exported.
+
 ## 0.2.0 — 2026-10-18
 
 - Change the notification body so Claude Code's collapsed view shows the message. Its first line is now `[turn done] <first line of the final message>` instead of the bare header `[Codex turn complete] from=codex`. The sender moves into the metadata line, which becomes `(codex thread …, cwd …, from=codex)` and is always present. Consumers that matched the old header must match the new tag.
